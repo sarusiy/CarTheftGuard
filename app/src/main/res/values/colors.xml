@@ -1,0 +1,8 @@
+<resources>
+    <color name="ctg_background">#F5F2EA</color>
+    <color name="ctg_surface">#FFFFFF</color>
+    <color name="ctg_text_primary">#1F2933</color>
+    <color name="ctg_text_secondary">#52616B</color>
+    <color name="ctg_accent">#0B6E69</color>
+    <color name="ctg_accent_dark">#084C49</color>
+</resources>
