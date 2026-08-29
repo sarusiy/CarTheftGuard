@@ -29,6 +29,7 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -60,6 +61,10 @@ public class MainActivity extends Activity {
     private static final int REQUEST_WIFI_PERMISSIONS = 43;
     private static final int MIN_FREQ_MS = 10;
     private static final int MAX_FREQ_MS = 60000;
+    private static final int COLOR_DEFAULT = 0xff1f2933;
+    private static final int COLOR_PROGRESS = 0xffb98900;
+    private static final int COLOR_SUCCESS = 0xff1b8a5a;
+    private static final int COLOR_ERROR = 0xffb00020;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService networkExecutor = Executors.newSingleThreadExecutor();
@@ -120,13 +125,22 @@ public class MainActivity extends Activity {
         @Override
         public void onConnectionStateChange(BluetoothGatt connectedGatt, int status, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                setStatus("Connected; discovering services");
-                if (hasConnectPermission()) {
+                setStatus("Connected; discovering services", COLOR_PROGRESS);
+                // Default ATT MTU (23) truncates longer board responses; negotiate a larger one first.
+                if (hasConnectPermission() && !connectedGatt.requestMtu(247)) {
                     connectedGatt.discoverServices();
                 }
                 return;
             }
             clearConnection("Disconnected");
+        }
+
+        @Override
+        public void onMtuChanged(BluetoothGatt connectedGatt, int mtu, int status) {
+            appendLog("BLE MTU negotiated: " + mtu);
+            if (hasConnectPermission()) {
+                connectedGatt.discoverServices();
+            }
         }
 
         @Override
@@ -154,7 +168,7 @@ public class MainActivity extends Activity {
             if (CCCD_UUID.equals(descriptor.getUuid()) && status == BluetoothGatt.GATT_SUCCESS) {
                 appendLog("Board responses enabled");
                 runOnUiThread(() -> provisionButton.setEnabled(true));
-                setStatus("Enter Wi-Fi settings");
+                setStatus("Enter Wi-Fi settings", COLOR_SUCCESS);
             } else {
                 setStatus("Response subscription failed: " + status);
             }
@@ -170,9 +184,9 @@ public class MainActivity extends Activity {
             if (response.startsWith("WiFi connected ip=")) {
                 boardIp = response.substring("WiFi connected ip=".length()).trim();
                 runOnUiThread(() -> frequencyButton.setEnabled(true));
-                setStatus("Wi-Fi ready: " + boardIp);
+                setStatus("Wi-Fi ready: " + boardIp, COLOR_SUCCESS);
             } else {
-                setStatus(response);
+                setStatus(response, response.startsWith("ERR") ? COLOR_ERROR : COLOR_DEFAULT);
             }
         }
     };
@@ -246,7 +260,7 @@ public class MainActivity extends Activity {
         root.setPadding(dp(20), dp(20), dp(20), dp(20));
         root.setBackgroundColor(0xfff5f2ea);
 
-        root.addView(label("CarTheftGuard v0.2.5", 28, true), matchWrap());
+        root.addView(label("CarTheftGuard v0.2.6", 28, true), matchWrap());
         statusText = label("Status: idle", 17, true);
         root.addView(statusText, matchWrapTop(16));
         deviceText = label("Board: not connected", 14, false);
@@ -270,6 +284,17 @@ public class MainActivity extends Activity {
         root.addView(ssidInput, matchHeightTop(54, 8));
         passwordInput = input("Wi-Fi password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         root.addView(passwordInput, matchHeightTop(54, 8));
+        CheckBox showPasswordCheckbox = new CheckBox(this);
+        showPasswordCheckbox.setText("Show password");
+        showPasswordCheckbox.setTextColor(0xff1f2933);
+        showPasswordCheckbox.setOnCheckedChangeListener((button, checked) -> {
+            int type = InputType.TYPE_CLASS_TEXT | (checked
+                    ? InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                    : InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            passwordInput.setInputType(type);
+            passwordInput.setSelection(passwordInput.length());
+        });
+        root.addView(showPasswordCheckbox, matchWrapTop(0));
         provisionButton = primaryButton("Connect Board to Wi-Fi");
         provisionButton.setEnabled(false);
         provisionButton.setOnClickListener(view -> provisionWifi());
@@ -422,7 +447,7 @@ public class MainActivity extends Activity {
         wifiConfigCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
         wifiConfigCharacteristic.setValue((ssid + "\n" + password).getBytes(StandardCharsets.UTF_8));
         if (gatt.writeCharacteristic(wifiConfigCharacteristic)) {
-            setStatus("Connecting board to Wi-Fi");
+            setStatus("Connecting board to Wi-Fi", COLOR_PROGRESS);
             appendLog("Wi-Fi credentials sent; waiting for board IP");
         } else {
             setStatus("Wi-Fi configuration was not accepted");
@@ -606,7 +631,14 @@ public class MainActivity extends Activity {
     }
 
     private void setStatus(String status) {
-        runOnUiThread(() -> statusText.setText("Status: " + status));
+        setStatus(status, COLOR_DEFAULT);
+    }
+
+    private void setStatus(String status, int color) {
+        runOnUiThread(() -> {
+            statusText.setText("Status: " + status);
+            statusText.setTextColor(color);
+        });
     }
 
     private void appendLog(String text) {
