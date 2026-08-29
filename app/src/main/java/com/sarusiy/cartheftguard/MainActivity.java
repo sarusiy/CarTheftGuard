@@ -221,7 +221,7 @@ public class MainActivity extends Activity {
         root.setPadding(dp(20), dp(20), dp(20), dp(20));
         root.setBackgroundColor(0xfff5f2ea);
 
-        root.addView(label("CarTheftGuard v0.2.2", 28, true), matchWrap());
+        root.addView(label("CarTheftGuard v0.2.3", 28, true), matchWrap());
         statusText = label("Status: idle", 17, true);
         root.addView(statusText, matchWrapTop(16));
         deviceText = label("Board: not connected", 14, false);
@@ -485,6 +485,11 @@ public class MainActivity extends Activity {
         return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
     }
 
+    private boolean isLocationEnabled() {
+        android.location.LocationManager locationManager = (android.location.LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        return locationManager != null && locationManager.isLocationEnabled();
+    }
+
     private boolean hasScanPermission() {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.S || checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
     }
@@ -516,23 +521,39 @@ public class MainActivity extends Activity {
             setStatus("Allow Location to list Wi-Fi networks");
             return;
         }
+        if (!isLocationEnabled()) {
+            setStatus("Turn on phone Location to list Wi-Fi networks");
+            return;
+        }
         if (wifiManager == null || !wifiManager.isWifiEnabled()) {
             setStatus("Enable Wi-Fi on this phone");
             return;
         }
-        boolean scanStarted = wifiManager.startScan();
-        showWifiNetworks();
-        if (!scanStarted) {
-            setStatus("Wi-Fi scan is throttled; showing the latest available networks");
+        try {
+            boolean scanStarted = wifiManager.startScan();
+            showWifiNetworks();
+            if (!scanStarted) {
+                setStatus("Wi-Fi scan is throttled; showing the latest available networks");
+            }
+        } catch (SecurityException exception) {
+            setStatus("Wi-Fi scan needs Location permission and Location service");
+            appendLog("Wi-Fi scan blocked: " + exception.getMessage());
         }
     }
 
     @SuppressLint("MissingPermission")
     private void showWifiNetworks() {
-        if (wifiManager == null || !hasWifiPermissions()) {
+        if (wifiManager == null || !hasWifiPermissions() || !isLocationEnabled()) {
             return;
         }
-        List<android.net.wifi.ScanResult> results = wifiManager.getScanResults();
+        List<android.net.wifi.ScanResult> results;
+        try {
+            results = wifiManager.getScanResults();
+        } catch (SecurityException exception) {
+            setStatus("Wi-Fi list needs Location permission and Location service");
+            appendLog("Wi-Fi list blocked: " + exception.getMessage());
+            return;
+        }
         Set<String> ssids = new HashSet<>();
         runOnUiThread(() -> {
             wifiNetworks.removeAllViews();

@@ -47,7 +47,7 @@ The Gradle wrapper builds the debug APK with JDK 17. Android Studio can install 
 7. Choose a preset or enter a half-period in milliseconds.
 8. Tap `Send Frequency Over Wi-Fi`.
 
-Android may ask for Location permission before it can display the Wi-Fi network list. Enable Wi-Fi and Location services on the phone, then tap `Refresh Wi-Fi Networks`. Android may throttle repeated Wi-Fi scans; when that happens the app shows the latest available list instead of closing.
+Android may ask for Location permission before it can display the Wi-Fi network list. Enable Wi-Fi and Location services on the phone, then tap `Refresh Wi-Fi Networks`. Android may throttle repeated Wi-Fi scans; when that happens the app shows the latest available list. Version `0.2.3` also reports unavailable Wi-Fi scan permissions/services on-screen instead of closing the app.
 
 BLE is used only to provision Wi-Fi and report the assigned board IP. The frequency request is then sent over the local Wi-Fi network to:
 
