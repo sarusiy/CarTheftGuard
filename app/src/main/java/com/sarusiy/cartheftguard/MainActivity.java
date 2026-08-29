@@ -346,7 +346,7 @@ public class MainActivity extends Activity {
         logHeader.addView(label("Log", 14, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button clearLogButton = secondaryButton("Clear Log");
         clearLogButton.setOnClickListener(view -> logText.setText(""));
-        logHeader.addView(clearLogButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+        logHeader.addView(clearLogButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(logHeader, matchWrapTop(18));
 
         logText = label("", 13, false);
