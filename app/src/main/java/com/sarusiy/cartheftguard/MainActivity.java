@@ -16,6 +16,9 @@ import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
 import android.content.Context;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.os.Build;
@@ -30,6 +33,7 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.net.wifi.WifiManager;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -38,6 +42,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -49,7 +54,7 @@ public class MainActivity extends Activity {
     private static final UUID RESPONSE_UUID = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb");
     private static final UUID WIFI_CONFIG_UUID = UUID.fromString("0000fff3-0000-1000-8000-00805f9b34fb");
     private static final UUID CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
-    private static final int REQUEST_BLE_PERMISSIONS = 42;
+    private static final int REQUEST_PERMISSIONS = 42;
     private static final int MIN_FREQ_MS = 10;
     private static final int MAX_FREQ_MS = 60000;
 
@@ -59,6 +64,7 @@ public class MainActivity extends Activity {
 
     private BluetoothAdapter bluetoothAdapter;
     private BluetoothLeScanner scanner;
+    private WifiManager wifiManager;
     private BluetoothGatt gatt;
     private BluetoothGattCharacteristic responseCharacteristic;
     private BluetoothGattCharacteristic wifiConfigCharacteristic;
@@ -69,12 +75,21 @@ public class MainActivity extends Activity {
     private TextView deviceText;
     private TextView logText;
     private LinearLayout scanResults;
+    private LinearLayout wifiNetworks;
     private EditText ssidInput;
     private EditText passwordInput;
     private EditText frequencyInput;
     private Button provisionButton;
     private Button frequencyButton;
     private Button scanButton;
+    private Button refreshWifiButton;
+
+    private final BroadcastReceiver wifiScanReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            showWifiNetworks();
+        }
+    };
 
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override
@@ -162,7 +177,14 @@ public class MainActivity extends Activity {
         BluetoothManager manager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
         bluetoothAdapter = manager == null ? null : manager.getAdapter();
         scanner = bluetoothAdapter == null ? null : bluetoothAdapter.getBluetoothLeScanner();
+        wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         setContentView(buildView());
+        IntentFilter filter = new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(wifiScanReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(wifiScanReceiver, filter);
+        }
         ensureBleReady();
     }
 
@@ -170,6 +192,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         stopScan();
         closeGatt();
+        unregisterReceiver(wifiScanReceiver);
         networkExecutor.shutdownNow();
         super.onDestroy();
     }
@@ -177,8 +200,9 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQUEST_BLE_PERMISSIONS) {
+        if (requestCode == REQUEST_PERMISSIONS) {
             ensureBleReady();
+            refreshWifiNetworks();
         }
     }
 
@@ -188,7 +212,7 @@ public class MainActivity extends Activity {
         root.setPadding(dp(20), dp(20), dp(20), dp(20));
         root.setBackgroundColor(0xfff5f2ea);
 
-        root.addView(label("CarTheftGuard v0.2.0", 28, true), matchWrap());
+        root.addView(label("CarTheftGuard v0.2.1", 28, true), matchWrap());
         statusText = label("Status: idle", 17, true);
         root.addView(statusText, matchWrapTop(16));
         deviceText = label("Board: not connected", 14, false);
@@ -202,6 +226,12 @@ public class MainActivity extends Activity {
         root.addView(scanResults, matchWrapTop(10));
 
         root.addView(label("Wi-Fi setup", 16, true), matchWrapTop(24));
+        refreshWifiButton = secondaryButton("Refresh Wi-Fi Networks");
+        refreshWifiButton.setOnClickListener(view -> refreshWifiNetworks());
+        root.addView(refreshWifiButton, matchHeightTop(48, 8));
+        wifiNetworks = new LinearLayout(this);
+        wifiNetworks.setOrientation(LinearLayout.VERTICAL);
+        root.addView(wifiNetworks, matchWrapTop(8));
         ssidInput = input("Wi-Fi network name", InputType.TYPE_CLASS_TEXT);
         root.addView(ssidInput, matchHeightTop(54, 8));
         passwordInput = input("Wi-Fi password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -242,7 +272,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (!hasBlePermissions()) {
-            requestPermissions(requiredPermissions(), REQUEST_BLE_PERMISSIONS);
+            requestPermissions(requiredPermissions(), REQUEST_PERMISSIONS);
             return;
         }
         scanner = bluetoothAdapter.getBluetoothLeScanner();
@@ -253,7 +283,7 @@ public class MainActivity extends Activity {
     @SuppressLint("MissingPermission")
     private void startScan() {
         if (!hasBlePermissions()) {
-            requestPermissions(requiredPermissions(), REQUEST_BLE_PERMISSIONS);
+            requestPermissions(requiredPermissions(), REQUEST_PERMISSIONS);
             return;
         }
         if (scanning) {
@@ -442,6 +472,14 @@ public class MainActivity extends Activity {
         return true;
     }
 
+    private boolean hasWifiPermissions() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return false;
+        }
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED;
+    }
+
     private boolean hasScanPermission() {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.S || checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
     }
@@ -452,9 +490,52 @@ public class MainActivity extends Activity {
 
     private String[] requiredPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            return new String[]{Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT};
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                return new String[]{Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT,
+                        Manifest.permission.NEARBY_WIFI_DEVICES, Manifest.permission.ACCESS_FINE_LOCATION};
+            }
+            return new String[]{Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.ACCESS_FINE_LOCATION};
         }
         return new String[]{Manifest.permission.ACCESS_FINE_LOCATION};
+    }
+
+    @SuppressLint("MissingPermission")
+    private void refreshWifiNetworks() {
+        if (!hasWifiPermissions()) {
+            requestPermissions(requiredPermissions(), REQUEST_PERMISSIONS);
+            setStatus("Wi-Fi scan permission required");
+            return;
+        }
+        if (wifiManager == null || !wifiManager.isWifiEnabled()) {
+            setStatus("Enable Wi-Fi on this phone");
+            return;
+        }
+        wifiManager.startScan();
+        showWifiNetworks();
+    }
+
+    @SuppressLint("MissingPermission")
+    private void showWifiNetworks() {
+        if (wifiManager == null || !hasWifiPermissions()) {
+            return;
+        }
+        List<android.net.wifi.ScanResult> results = wifiManager.getScanResults();
+        Set<String> ssids = new HashSet<>();
+        wifiNetworks.removeAllViews();
+        for (android.net.wifi.ScanResult result : results) {
+            String ssid = result.SSID == null ? "" : result.SSID.trim();
+            if (ssid.isEmpty() || !ssids.add(ssid)) {
+                continue;
+            }
+            Button network = secondaryButton(ssid + "  " + result.level + " dBm");
+            network.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+            network.setOnClickListener(view -> ssidInput.setText(ssid));
+            wifiNetworks.addView(network, matchHeightTop(44, 4));
+        }
+        if (ssids.isEmpty()) {
+            setStatus("No Wi-Fi networks found; enter a hidden network name manually");
+        }
     }
 
     private void setStatus(String status) {

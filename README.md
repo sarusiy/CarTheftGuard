@@ -40,11 +40,14 @@ The Gradle wrapper builds the debug APK with JDK 17. Android Studio can install 
 
 1. Tap `Scan`.
 2. Connect to `JC-P4-C6`.
-3. Enter the Wi-Fi network name and password that the phone and board should share.
-4. Tap `Connect Board to Wi-Fi`.
-5. Wait for `Wi-Fi ready: <board-ip>`.
-6. Choose a preset or enter a half-period in milliseconds.
-7. Tap `Send Frequency Over Wi-Fi`.
+3. Tap `Refresh Wi-Fi Networks` and tap the network name that the phone and board should share. Hidden networks can still be entered manually.
+4. Enter the Wi-Fi password.
+5. Tap `Connect Board to Wi-Fi`.
+6. Wait for `Wi-Fi ready: <board-ip>`.
+7. Choose a preset or enter a half-period in milliseconds.
+8. Tap `Send Frequency Over Wi-Fi`.
+
+Android may ask for Nearby Wi-Fi Devices and Location permission before it can display the Wi-Fi network list. Wi-Fi must also be enabled on the phone.
 
 BLE is used only to provision Wi-Fi and report the assigned board IP. The frequency request is then sent over the local Wi-Fi network to:
 
