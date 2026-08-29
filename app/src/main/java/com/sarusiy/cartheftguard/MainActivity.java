@@ -55,6 +55,7 @@ public class MainActivity extends Activity {
     private static final UUID WIFI_CONFIG_UUID = UUID.fromString("0000fff3-0000-1000-8000-00805f9b34fb");
     private static final UUID CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private static final int REQUEST_PERMISSIONS = 42;
+    private static final int REQUEST_WIFI_PERMISSIONS = 43;
     private static final int MIN_FREQ_MS = 10;
     private static final int MAX_FREQ_MS = 60000;
 
@@ -69,6 +70,7 @@ public class MainActivity extends Activity {
     private BluetoothGattCharacteristic responseCharacteristic;
     private BluetoothGattCharacteristic wifiConfigCharacteristic;
     private boolean scanning;
+    private boolean wifiReceiverRegistered;
     private String boardIp;
 
     private TextView statusText;
@@ -87,7 +89,9 @@ public class MainActivity extends Activity {
     private final BroadcastReceiver wifiScanReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            showWifiNetworks();
+            if (WifiManager.SCAN_RESULTS_AVAILABLE_ACTION.equals(intent.getAction())) {
+                handler.post(MainActivity.this::showWifiNetworks);
+            }
         }
     };
 
@@ -185,6 +189,7 @@ public class MainActivity extends Activity {
         } else {
             registerReceiver(wifiScanReceiver, filter);
         }
+        wifiReceiverRegistered = true;
         ensureBleReady();
     }
 
@@ -192,7 +197,10 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         stopScan();
         closeGatt();
-        unregisterReceiver(wifiScanReceiver);
+        if (wifiReceiverRegistered) {
+            unregisterReceiver(wifiScanReceiver);
+            wifiReceiverRegistered = false;
+        }
         networkExecutor.shutdownNow();
         super.onDestroy();
     }
@@ -202,6 +210,7 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_PERMISSIONS) {
             ensureBleReady();
+        } else if (requestCode == REQUEST_WIFI_PERMISSIONS) {
             refreshWifiNetworks();
         }
     }
@@ -212,7 +221,7 @@ public class MainActivity extends Activity {
         root.setPadding(dp(20), dp(20), dp(20), dp(20));
         root.setBackgroundColor(0xfff5f2ea);
 
-        root.addView(label("CarTheftGuard v0.2.1", 28, true), matchWrap());
+        root.addView(label("CarTheftGuard v0.2.2", 28, true), matchWrap());
         statusText = label("Status: idle", 17, true);
         root.addView(statusText, matchWrapTop(16));
         deviceText = label("Board: not connected", 14, false);
@@ -473,11 +482,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean hasWifiPermissions() {
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            return false;
-        }
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-                checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED;
+        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
     }
 
     private boolean hasScanPermission() {
@@ -500,19 +505,26 @@ public class MainActivity extends Activity {
         return new String[]{Manifest.permission.ACCESS_FINE_LOCATION};
     }
 
+    private String[] requiredWifiPermissions() {
+        return new String[]{Manifest.permission.ACCESS_FINE_LOCATION};
+    }
+
     @SuppressLint("MissingPermission")
     private void refreshWifiNetworks() {
         if (!hasWifiPermissions()) {
-            requestPermissions(requiredPermissions(), REQUEST_PERMISSIONS);
-            setStatus("Wi-Fi scan permission required");
+            requestPermissions(requiredWifiPermissions(), REQUEST_WIFI_PERMISSIONS);
+            setStatus("Allow Location to list Wi-Fi networks");
             return;
         }
         if (wifiManager == null || !wifiManager.isWifiEnabled()) {
             setStatus("Enable Wi-Fi on this phone");
             return;
         }
-        wifiManager.startScan();
+        boolean scanStarted = wifiManager.startScan();
         showWifiNetworks();
+        if (!scanStarted) {
+            setStatus("Wi-Fi scan is throttled; showing the latest available networks");
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -522,20 +534,25 @@ public class MainActivity extends Activity {
         }
         List<android.net.wifi.ScanResult> results = wifiManager.getScanResults();
         Set<String> ssids = new HashSet<>();
-        wifiNetworks.removeAllViews();
-        for (android.net.wifi.ScanResult result : results) {
-            String ssid = result.SSID == null ? "" : result.SSID.trim();
-            if (ssid.isEmpty() || !ssids.add(ssid)) {
-                continue;
+        runOnUiThread(() -> {
+            wifiNetworks.removeAllViews();
+            for (android.net.wifi.ScanResult result : results) {
+                String ssid = result.SSID == null ? "" : result.SSID.trim();
+                if (ssid.isEmpty() || !ssids.add(ssid)) {
+                    continue;
+                }
+                Button network = secondaryButton(ssid + "  " + result.level + " dBm");
+                network.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+                network.setOnClickListener(view -> {
+                    ssidInput.setText(ssid);
+                    setStatus("Selected Wi-Fi network: " + ssid);
+                });
+                wifiNetworks.addView(network, matchHeightTop(44, 4));
             }
-            Button network = secondaryButton(ssid + "  " + result.level + " dBm");
-            network.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-            network.setOnClickListener(view -> ssidInput.setText(ssid));
-            wifiNetworks.addView(network, matchHeightTop(44, 4));
-        }
-        if (ssids.isEmpty()) {
-            setStatus("No Wi-Fi networks found; enter a hidden network name manually");
-        }
+            if (ssids.isEmpty()) {
+                setStatus("No Wi-Fi networks found; enter a hidden network name manually");
+            }
+        });
     }
 
     private void setStatus(String status) {
