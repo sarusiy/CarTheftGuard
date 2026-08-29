@@ -4,7 +4,7 @@ Android control app for the JC-ESP32P4-M3 board.
 
 ## Current milestone
 
-The first app screen controls the ESP32-P4 LED blink half-period over BLE. Android scan, connection, command write, and visible LED timing change are confirmed on hardware.
+BLE scan/connect, Wi-Fi provisioning over BLE, and frequency control over the local Wi-Fi network's HTTP API are all validated end-to-end on hardware. The Android app connects over BLE, sends Wi-Fi credentials, waits for the board to join the network and report its IP, then sends `freq <ms>` commands directly over Wi-Fi (BLE is only used for provisioning and status, not for the actual frequency commands).
 
 Firmware endpoint:
 
@@ -47,7 +47,9 @@ The Gradle wrapper builds the debug APK with JDK 17. Android Studio can install 
 7. Choose a preset or enter a half-period in milliseconds.
 8. Tap `Send Frequency Over Wi-Fi`.
 
-Android may ask for Location permission before it can display the Wi-Fi network list. Enable Wi-Fi and Location services on the phone, then tap `Refresh Wi-Fi Networks`. Android may throttle repeated Wi-Fi scans; when that happens the app shows the latest available list. Version `0.2.3` also reports unavailable Wi-Fi scan permissions/services on-screen instead of closing the app.
+Android may ask for Location permission before it can display the Wi-Fi network list. Enable Wi-Fi and Location services on the phone, then tap `Refresh Wi-Fi Networks`. Android may throttle repeated Wi-Fi scans; when that happens the app shows the latest available list.
+
+Once the board is connected over BLE or Wi-Fi, the matching "Scan for Board" / "Connect Board to Wi-Fi" section folds away automatically to reduce clutter. Tapping a Wi-Fi network in the list also folds that list so the password field is front and center. Use **Restart Connection** (near the top) to reset everything and start a fresh scan, and **Clear Log** to clear the message list.
 
 BLE is used only to provision Wi-Fi and report the assigned board IP. The frequency request is then sent over the local Wi-Fi network to:
 
@@ -71,9 +73,9 @@ The LED should change blink speed immediately. The app waits for the board's `0x
 OK freq=250 ms
 ```
 
-The screen title must show `CarTheftGuard v0.1.2`; this identifies the version that lists all discovered BLE devices and subscribes to the response characteristic.
+The screen title shows the current app version, currently `CarTheftGuard v0.2.8`.
 
 ## Next work
 
-- Validate Wi-Fi provisioning and HTTP frequency control on a phone and local access point.
 - Replace plain local HTTP with authenticated HTTPS before using the control API on an untrusted network.
+- rclone is used to publish debug builds to Drive (`tools/publish-apk-to-drive.ps1`); its shared client_id is being retired by Google during 2026, so a dedicated OAuth client may be needed later.
