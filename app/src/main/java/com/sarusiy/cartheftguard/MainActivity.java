@@ -27,6 +27,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -83,7 +84,9 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private TextView deviceText;
     private TextView logText;
+    private LinearLayout scanSection;
     private LinearLayout scanResults;
+    private LinearLayout wifiSetupSection;
     private LinearLayout wifiNetworks;
     private EditText ssidInput;
     private EditText passwordInput;
@@ -167,7 +170,10 @@ public class MainActivity extends Activity {
         public void onDescriptorWrite(BluetoothGatt connectedGatt, BluetoothGattDescriptor descriptor, int status) {
             if (CCCD_UUID.equals(descriptor.getUuid()) && status == BluetoothGatt.GATT_SUCCESS) {
                 appendLog("Board responses enabled");
-                runOnUiThread(() -> provisionButton.setEnabled(true));
+                runOnUiThread(() -> {
+                    provisionButton.setEnabled(true);
+                    scanSection.setVisibility(View.GONE);
+                });
                 setStatus("Enter Wi-Fi settings", COLOR_SUCCESS);
             } else {
                 setStatus("Response subscription failed: " + status);
@@ -183,7 +189,10 @@ public class MainActivity extends Activity {
             appendLog("Board: " + response);
             if (response.startsWith("WiFi connected ip=")) {
                 boardIp = response.substring("WiFi connected ip=".length()).trim();
-                runOnUiThread(() -> frequencyButton.setEnabled(true));
+                runOnUiThread(() -> {
+                    frequencyButton.setEnabled(true);
+                    wifiSetupSection.setVisibility(View.GONE);
+                });
                 setStatus("Wi-Fi ready: " + boardIp, COLOR_SUCCESS);
             } else {
                 setStatus(response, response.startsWith("ERR") ? COLOR_ERROR : COLOR_DEFAULT);
@@ -260,30 +269,39 @@ public class MainActivity extends Activity {
         root.setPadding(dp(20), dp(20), dp(20), dp(20));
         root.setBackgroundColor(0xfff5f2ea);
 
-        root.addView(label("CarTheftGuard v0.2.6", 28, true), matchWrap());
+        root.addView(label("CarTheftGuard v0.2.7", 28, true), matchWrap());
         statusText = label("Status: idle", 17, true);
         root.addView(statusText, matchWrapTop(16));
         deviceText = label("Board: not connected", 14, false);
         root.addView(deviceText, matchWrapTop(6));
 
+        Button restartButton = secondaryButton("Restart Connection");
+        restartButton.setOnClickListener(view -> restartConnection());
+        root.addView(restartButton, matchHeightTop(46, 10));
+
+        scanSection = new LinearLayout(this);
+        scanSection.setOrientation(LinearLayout.VERTICAL);
         scanButton = primaryButton("Scan for Board");
         scanButton.setOnClickListener(view -> startScan());
-        root.addView(scanButton, matchHeightTop(52, 18));
+        scanSection.addView(scanButton, matchHeightTop(52, 18));
         scanResults = new LinearLayout(this);
         scanResults.setOrientation(LinearLayout.VERTICAL);
-        root.addView(scanResults, matchWrapTop(10));
+        scanSection.addView(scanResults, matchWrapTop(10));
+        root.addView(scanSection, matchWrap());
 
-        root.addView(label("Wi-Fi setup", 16, true), matchWrapTop(24));
+        wifiSetupSection = new LinearLayout(this);
+        wifiSetupSection.setOrientation(LinearLayout.VERTICAL);
+        wifiSetupSection.addView(label("Wi-Fi setup", 16, true), matchWrapTop(24));
         refreshWifiButton = secondaryButton("Refresh Wi-Fi Networks");
         refreshWifiButton.setOnClickListener(view -> refreshWifiNetworks());
-        root.addView(refreshWifiButton, matchHeightTop(48, 8));
+        wifiSetupSection.addView(refreshWifiButton, matchHeightTop(48, 8));
         wifiNetworks = new LinearLayout(this);
         wifiNetworks.setOrientation(LinearLayout.VERTICAL);
-        root.addView(wifiNetworks, matchWrapTop(8));
+        wifiSetupSection.addView(wifiNetworks, matchWrapTop(8));
         ssidInput = input("Wi-Fi network name", InputType.TYPE_CLASS_TEXT);
-        root.addView(ssidInput, matchHeightTop(54, 8));
+        wifiSetupSection.addView(ssidInput, matchHeightTop(54, 8));
         passwordInput = input("Wi-Fi password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        root.addView(passwordInput, matchHeightTop(54, 8));
+        wifiSetupSection.addView(passwordInput, matchHeightTop(54, 8));
         CheckBox showPasswordCheckbox = new CheckBox(this);
         showPasswordCheckbox.setText("Show password");
         showPasswordCheckbox.setTextColor(0xff1f2933);
@@ -294,11 +312,12 @@ public class MainActivity extends Activity {
             passwordInput.setInputType(type);
             passwordInput.setSelection(passwordInput.length());
         });
-        root.addView(showPasswordCheckbox, matchWrapTop(0));
+        wifiSetupSection.addView(showPasswordCheckbox, matchWrapTop(0));
         provisionButton = primaryButton("Connect Board to Wi-Fi");
         provisionButton.setEnabled(false);
         provisionButton.setOnClickListener(view -> provisionWifi());
-        root.addView(provisionButton, matchHeightTop(52, 12));
+        wifiSetupSection.addView(provisionButton, matchHeightTop(52, 12));
+        root.addView(wifiSetupSection, matchWrap());
 
         root.addView(label("Blink half-period", 16, true), matchWrapTop(28));
         frequencyInput = input("Milliseconds: 10 to 60000", InputType.TYPE_CLASS_NUMBER);
@@ -321,9 +340,18 @@ public class MainActivity extends Activity {
         settingsButton.setOnClickListener(view -> openAppSettings());
         root.addView(settingsButton, matchHeightTop(46, 12));
 
+        LinearLayout logHeader = new LinearLayout(this);
+        logHeader.setOrientation(LinearLayout.HORIZONTAL);
+        logHeader.setGravity(Gravity.CENTER_VERTICAL);
+        logHeader.addView(label("Log", 14, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button clearLogButton = secondaryButton("Clear Log");
+        clearLogButton.setOnClickListener(view -> logText.setText(""));
+        logHeader.addView(clearLogButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+        root.addView(logHeader, matchWrapTop(18));
+
         logText = label("", 13, false);
         logText.setTypeface(Typeface.MONOSPACE);
-        root.addView(logText, matchWrapTop(18));
+        root.addView(logText, matchWrapTop(6));
         ScrollView scroll = new ScrollView(this);
         scroll.addView(root);
         return scroll;
@@ -522,8 +550,31 @@ public class MainActivity extends Activity {
             deviceText.setText("Board: not connected");
             provisionButton.setEnabled(false);
             frequencyButton.setEnabled(false);
+            scanSection.setVisibility(View.VISIBLE);
+            wifiSetupSection.setVisibility(View.GONE);
         });
         setStatus(status);
+    }
+
+    @SuppressLint("MissingPermission")
+    private void restartConnection() {
+        stopScan();
+        closeGatt();
+        boardIp = null;
+        responseCharacteristic = null;
+        wifiConfigCharacteristic = null;
+        displayedAddresses.clear();
+        scanResults.removeAllViews();
+        wifiNetworks.removeAllViews();
+        ssidInput.setText("");
+        passwordInput.setText("");
+        deviceText.setText("Board: not connected");
+        provisionButton.setEnabled(false);
+        frequencyButton.setEnabled(false);
+        scanSection.setVisibility(View.VISIBLE);
+        wifiSetupSection.setVisibility(View.VISIBLE);
+        setStatus("Restarting connection");
+        startScan();
     }
 
     private boolean hasBlePermissions() {
@@ -610,6 +661,7 @@ public class MainActivity extends Activity {
         }
         Set<String> ssids = new HashSet<>();
         runOnUiThread(() -> {
+            wifiNetworks.setVisibility(View.VISIBLE);
             wifiNetworks.removeAllViews();
             for (android.net.wifi.ScanResult result : results) {
                 String ssid = result.SSID == null ? "" : result.SSID.trim();
@@ -621,6 +673,9 @@ public class MainActivity extends Activity {
                 network.setOnClickListener(view -> {
                     ssidInput.setText(ssid);
                     setStatus("Selected Wi-Fi network: " + ssid);
+                    // Fold the list once a network is picked so the password field is front and center.
+                    wifiNetworks.setVisibility(View.GONE);
+                    passwordInput.requestFocus();
                 });
                 wifiNetworks.addView(network, matchHeightTop(44, 4));
             }
