@@ -34,6 +34,8 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.net.wifi.WifiManager;
+import android.net.Uri;
+import android.provider.Settings;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -208,11 +210,34 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQUEST_PERMISSIONS) {
-            ensureBleReady();
-        } else if (requestCode == REQUEST_WIFI_PERMISSIONS) {
-            refreshWifiNetworks();
+        boolean allGranted = grantResults.length > 0;
+        for (int result : grantResults) {
+            if (result != PackageManager.PERMISSION_GRANTED) {
+                allGranted = false;
+                break;
+            }
         }
+        // Only re-run the action when granted; retrying on denial would loop forever
+        // once Android stops showing the dialog for a permanently denied permission.
+        if (requestCode == REQUEST_PERMISSIONS) {
+            if (allGranted) {
+                ensureBleReady();
+            } else {
+                setStatus("Bluetooth permission denied. Tap 'Open Permission Settings' below.");
+            }
+        } else if (requestCode == REQUEST_WIFI_PERMISSIONS) {
+            if (allGranted) {
+                refreshWifiNetworks();
+            } else {
+                setStatus("Location permission denied. Tap 'Open Permission Settings' below.");
+            }
+        }
+    }
+
+    private void openAppSettings() {
+        Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+        intent.setData(Uri.fromParts("package", getPackageName(), null));
+        startActivity(intent);
     }
 
     private ScrollView buildView() {
@@ -221,7 +246,7 @@ public class MainActivity extends Activity {
         root.setPadding(dp(20), dp(20), dp(20), dp(20));
         root.setBackgroundColor(0xfff5f2ea);
 
-        root.addView(label("CarTheftGuard v0.2.3", 28, true), matchWrap());
+        root.addView(label("CarTheftGuard v0.2.4", 28, true), matchWrap());
         statusText = label("Status: idle", 17, true);
         root.addView(statusText, matchWrapTop(16));
         deviceText = label("Board: not connected", 14, false);
@@ -266,6 +291,10 @@ public class MainActivity extends Activity {
         frequencyButton.setEnabled(false);
         frequencyButton.setOnClickListener(view -> sendFrequencyOverWifi());
         root.addView(frequencyButton, matchHeightTop(52, 12));
+
+        Button settingsButton = secondaryButton("Open Permission Settings");
+        settingsButton.setOnClickListener(view -> openAppSettings());
+        root.addView(settingsButton, matchHeightTop(46, 12));
 
         logText = label("", 13, false);
         logText.setTypeface(Typeface.MONOSPACE);
