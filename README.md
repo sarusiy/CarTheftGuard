@@ -39,9 +39,19 @@ The Gradle wrapper builds the debug APK with JDK 17. Android Studio can install 
 ## Run
 
 1. Tap `Scan`.
-2. Wait for the app to find `JC-P4-C6`.
-3. After status changes to `Ready`, choose a preset or enter a half-period in milliseconds.
-4. Tap `Send Frequency`.
+2. Connect to `JC-P4-C6`.
+3. Enter the Wi-Fi network name and password that the phone and board should share.
+4. Tap `Connect Board to Wi-Fi`.
+5. Wait for `Wi-Fi ready: <board-ip>`.
+6. Choose a preset or enter a half-period in milliseconds.
+7. Tap `Send Frequency Over Wi-Fi`.
+
+BLE is used only to provision Wi-Fi and report the assigned board IP. The frequency request is then sent over the local Wi-Fi network to:
+
+```text
+POST http://<board-ip>/api/frequency
+Body: freq <ms>
+```
 
 Examples sent by the app:
 
@@ -62,5 +72,5 @@ The screen title must show `CarTheftGuard v0.1.2`; this identifies the version t
 
 ## Next work
 
-- Validate `OK` and `ERR` notifications from the board on a phone.
-- Add BLE-based Wi-Fi provisioning for SSID/password after LED control is stable.
+- Validate Wi-Fi provisioning and HTTP frequency control on a phone and local access point.
+- Replace plain local HTTP with authenticated HTTPS before using the control API on an untrusted network.

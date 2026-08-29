@@ -29,55 +29,60 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.SeekBar;
 import android.widget.TextView;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String TARGET_NAME = "JC-P4-C6";
     private static final UUID SERVICE_UUID = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb");
-    private static final UUID COMMAND_UUID = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb");
     private static final UUID RESPONSE_UUID = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb");
-    private static final UUID CLIENT_CHARACTERISTIC_CONFIG_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
+    private static final UUID WIFI_CONFIG_UUID = UUID.fromString("0000fff3-0000-1000-8000-00805f9b34fb");
+    private static final UUID CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private static final int REQUEST_BLE_PERMISSIONS = 42;
     private static final int MIN_FREQ_MS = 10;
     private static final int MAX_FREQ_MS = 60000;
-    private static final int DEFAULT_FREQ_MS = 250;
 
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ExecutorService networkExecutor = Executors.newSingleThreadExecutor();
+    private final Set<String> displayedAddresses = new HashSet<>();
 
     private BluetoothAdapter bluetoothAdapter;
     private BluetoothLeScanner scanner;
     private BluetoothGatt gatt;
-    private BluetoothGattCharacteristic commandCharacteristic;
     private BluetoothGattCharacteristic responseCharacteristic;
+    private BluetoothGattCharacteristic wifiConfigCharacteristic;
     private boolean scanning;
-    private final Set<String> displayedDeviceAddresses = new HashSet<>();
+    private String boardIp;
 
     private TextView statusText;
     private TextView deviceText;
-    private EditText frequencyInput;
-    private SeekBar frequencySlider;
-    private Button scanButton;
-    private Button sendButton;
     private TextView logText;
     private LinearLayout scanResults;
+    private EditText ssidInput;
+    private EditText passwordInput;
+    private EditText frequencyInput;
+    private Button provisionButton;
+    private Button frequencyButton;
+    private Button scanButton;
 
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override
         public void onScanResult(int callbackType, ScanResult result) {
             BluetoothDevice device = result.getDevice();
-            String name = getAdvertisedName(result, device);
-            showScanResult(device, name, result.getRssi());
+            String name = result.getScanRecord() == null ? null : result.getScanRecord().getDeviceName();
+            showDevice(device, name, result.getRssi());
             if (TARGET_NAME.equals(name)) {
-                appendLog("Found " + TARGET_NAME);
                 stopScan();
                 connect(device);
             }
@@ -85,89 +90,67 @@ public class MainActivity extends Activity {
 
         @Override
         public void onScanFailed(int errorCode) {
-            runOnUiThread(() -> {
-                scanning = false;
-                setStatus("Scan failed: " + errorCode);
-                scanButton.setText("Scan");
-            });
+            scanning = false;
+            setStatus("Scan failed: " + errorCode);
         }
     };
 
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
         @Override
-        public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                appendLog("Connected; discovering services");
-                setStatus("Connected, discovering services");
+        public void onConnectionStateChange(BluetoothGatt connectedGatt, int status, int newState) {
+            if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                setStatus("Connected; discovering services");
                 if (hasConnectPermission()) {
-                    gatt.discoverServices();
+                    connectedGatt.discoverServices();
                 }
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                commandCharacteristic = null;
-                responseCharacteristic = null;
-                appendLog("Disconnected");
-                setStatus("Disconnected");
-                runOnUiThread(() -> {
-                    deviceText.setText("Device: none");
-                    sendButton.setEnabled(false);
-                    scanButton.setEnabled(true);
-                    scanButton.setText("Scan");
-                });
+                return;
             }
+            clearConnection("Disconnected");
         }
 
         @Override
-        public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+        public void onServicesDiscovered(BluetoothGatt connectedGatt, int status) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 setStatus("Service discovery failed: " + status);
                 return;
             }
-
-            BluetoothGattService service = gatt.getService(SERVICE_UUID);
+            BluetoothGattService service = connectedGatt.getService(SERVICE_UUID);
             if (service == null) {
-                setStatus("Service 0xFFF0 not found");
+                setStatus("Board service 0xFFF0 not found");
                 return;
             }
-
-            commandCharacteristic = service.getCharacteristic(COMMAND_UUID);
             responseCharacteristic = service.getCharacteristic(RESPONSE_UUID);
-            if (commandCharacteristic == null || responseCharacteristic == null) {
-                setStatus("Firmware response service is not available");
+            wifiConfigCharacteristic = service.getCharacteristic(WIFI_CONFIG_UUID);
+            if (responseCharacteristic == null || wifiConfigCharacteristic == null) {
+                setStatus("Install the current board firmware first");
                 return;
             }
-
-            enableResponseNotifications(gatt);
+            subscribeToBoardResponses(connectedGatt);
         }
 
         @Override
-        public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
-            if (CLIENT_CHARACTERISTIC_CONFIG_UUID.equals(descriptor.getUuid()) && status == BluetoothGatt.GATT_SUCCESS) {
-                appendLog("Board response notifications enabled");
-                runOnUiThread(() -> {
-                    setStatus("Ready");
-                    sendButton.setEnabled(true);
-                });
+        public void onDescriptorWrite(BluetoothGatt connectedGatt, BluetoothGattDescriptor descriptor, int status) {
+            if (CCCD_UUID.equals(descriptor.getUuid()) && status == BluetoothGatt.GATT_SUCCESS) {
+                appendLog("Board responses enabled");
+                runOnUiThread(() -> provisionButton.setEnabled(true));
+                setStatus("Enter Wi-Fi settings");
             } else {
-                setStatus("Response notification setup failed: " + status);
+                setStatus("Response subscription failed: " + status);
             }
         }
 
         @Override
-        public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                setStatus("Command sent; waiting for board");
-                appendLog("Write accepted; waiting for board response");
-            } else {
-                setStatus("Write failed: " + status);
-                appendLog("Write failed: " + status);
+        public void onCharacteristicChanged(BluetoothGatt connectedGatt, BluetoothGattCharacteristic characteristic) {
+            if (!RESPONSE_UUID.equals(characteristic.getUuid())) {
+                return;
             }
-        }
-
-        @Override
-        public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
-            if (RESPONSE_UUID.equals(characteristic.getUuid())) {
-                String response = new String(characteristic.getValue(), StandardCharsets.UTF_8).trim();
-                appendLog("Board: " + response);
+            String response = new String(characteristic.getValue(), StandardCharsets.UTF_8).trim();
+            appendLog("Board: " + response);
+            if (response.startsWith("WiFi connected ip=")) {
+                boardIp = response.substring("WiFi connected ip=".length()).trim();
+                runOnUiThread(() -> frequencyButton.setEnabled(true));
+                setStatus("Wi-Fi ready: " + boardIp);
+            } else {
                 setStatus(response);
             }
         }
@@ -176,19 +159,18 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
-        bluetoothAdapter = bluetoothManager != null ? bluetoothManager.getAdapter() : null;
-        scanner = bluetoothAdapter != null ? bluetoothAdapter.getBluetoothLeScanner() : null;
-
-        setContentView(buildContentView());
-        syncPermissionState();
+        BluetoothManager manager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        bluetoothAdapter = manager == null ? null : manager.getAdapter();
+        scanner = bluetoothAdapter == null ? null : bluetoothAdapter.getBluetoothLeScanner();
+        setContentView(buildView());
+        ensureBleReady();
     }
 
     @Override
     protected void onDestroy() {
         stopScan();
         closeGatt();
+        networkExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -196,109 +178,71 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_BLE_PERMISSIONS) {
-            syncPermissionState();
+            ensureBleReady();
         }
     }
 
-    private ScrollView buildContentView() {
-        int padding = dp(20);
+    private ScrollView buildView() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(padding, padding, padding, padding);
+        root.setPadding(dp(20), dp(20), dp(20), dp(20));
         root.setBackgroundColor(0xfff5f2ea);
 
-        TextView title = new TextView(this);
-        title.setText("CarTheftGuard v0.1.2");
-        title.setTextColor(0xff1f2933);
-        title.setTextSize(28);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        root.addView(title, matchWrap());
+        root.addView(label("CarTheftGuard v0.2.0", 28, true), matchWrap());
+        statusText = label("Status: idle", 17, true);
+        root.addView(statusText, matchWrapTop(16));
+        deviceText = label("Board: not connected", 14, false);
+        root.addView(deviceText, matchWrapTop(6));
 
-        statusText = label("Status: idle", 18, true);
-        root.addView(statusText, matchWrapTop(18));
-
-        deviceText = label("Device: none", 15, false);
-        root.addView(deviceText, matchWrapTop(8));
-
-        scanButton = primaryButton("Scan");
-        scanButton.setOnClickListener(view -> startScanFlow());
-        root.addView(scanButton, matchHeightTop(52, 24));
-
+        scanButton = primaryButton("Scan for Board");
+        scanButton.setOnClickListener(view -> startScan());
+        root.addView(scanButton, matchHeightTop(52, 18));
         scanResults = new LinearLayout(this);
         scanResults.setOrientation(LinearLayout.VERTICAL);
-        root.addView(scanResults, matchWrapTop(12));
+        root.addView(scanResults, matchWrapTop(10));
 
-        TextView freqLabel = label("Blink half-period", 16, true);
-        root.addView(freqLabel, matchWrapTop(28));
+        root.addView(label("Wi-Fi setup", 16, true), matchWrapTop(24));
+        ssidInput = input("Wi-Fi network name", InputType.TYPE_CLASS_TEXT);
+        root.addView(ssidInput, matchHeightTop(54, 8));
+        passwordInput = input("Wi-Fi password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        root.addView(passwordInput, matchHeightTop(54, 8));
+        provisionButton = primaryButton("Connect Board to Wi-Fi");
+        provisionButton.setEnabled(false);
+        provisionButton.setOnClickListener(view -> provisionWifi());
+        root.addView(provisionButton, matchHeightTop(52, 12));
 
-        frequencyInput = new EditText(this);
-        frequencyInput.setText(String.valueOf(DEFAULT_FREQ_MS));
-        frequencyInput.setSelectAllOnFocus(true);
-        frequencyInput.setSingleLine(true);
-        frequencyInput.setInputType(InputType.TYPE_CLASS_NUMBER);
-        frequencyInput.setTextSize(20);
-        frequencyInput.setGravity(Gravity.CENTER_VERTICAL);
-        root.addView(frequencyInput, matchHeightTop(56, 8));
-
-        frequencySlider = new SeekBar(this);
-        frequencySlider.setMax(4990);
-        frequencySlider.setProgress(valueToSlider(DEFAULT_FREQ_MS));
-        frequencySlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                if (fromUser) {
-                    frequencyInput.setText(String.valueOf(sliderToValue(progress)));
-                }
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {
-            }
-        });
-        root.addView(frequencySlider, matchWrapTop(12));
-
+        root.addView(label("Blink half-period", 16, true), matchWrapTop(28));
+        frequencyInput = input("Milliseconds: 10 to 60000", InputType.TYPE_CLASS_NUMBER);
+        frequencyInput.setText("250");
+        root.addView(frequencyInput, matchHeightTop(54, 8));
         LinearLayout presets = new LinearLayout(this);
-        presets.setOrientation(LinearLayout.HORIZONTAL);
-        int[] presetValues = {100, 250, 500, 1000};
-        for (int value : presetValues) {
+        int[] values = {100, 250, 500, 1000};
+        for (int value : values) {
             Button preset = secondaryButton(String.valueOf(value));
-            preset.setOnClickListener(view -> setFrequency(value));
+            preset.setOnClickListener(view -> frequencyInput.setText(String.valueOf(value)));
             presets.addView(preset, new LinearLayout.LayoutParams(0, dp(44), 1));
         }
-        root.addView(presets, matchWrapTop(12));
-
-        sendButton = primaryButton("Send Frequency");
-        sendButton.setEnabled(false);
-        sendButton.setOnClickListener(view -> sendFrequency());
-        root.addView(sendButton, matchHeightTop(52, 24));
+        root.addView(presets, matchWrapTop(10));
+        frequencyButton = primaryButton("Send Frequency Over Wi-Fi");
+        frequencyButton.setEnabled(false);
+        frequencyButton.setOnClickListener(view -> sendFrequencyOverWifi());
+        root.addView(frequencyButton, matchHeightTop(52, 12));
 
         logText = label("", 13, false);
         logText.setTypeface(Typeface.MONOSPACE);
-        root.addView(logText, matchWrapTop(20));
-
-        ScrollView scrollView = new ScrollView(this);
-        scrollView.addView(root);
-        return scrollView;
+        root.addView(logText, matchWrapTop(18));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(root);
+        return scroll;
     }
 
-    private void syncPermissionState() {
-        if (bluetoothAdapter == null) {
-            setStatus("Bluetooth not available");
-            scanButton.setEnabled(false);
-            return;
-        }
-        if (!bluetoothAdapter.isEnabled()) {
+    private void ensureBleReady() {
+        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
             setStatus("Enable Bluetooth on this phone");
-            scanButton.setEnabled(false);
             return;
         }
-        if (!hasAllPermissions()) {
+        if (!hasBlePermissions()) {
             requestPermissions(requiredPermissions(), REQUEST_BLE_PERMISSIONS);
-            setStatus("Bluetooth permission required");
             return;
         }
         scanner = bluetoothAdapter.getBluetoothLeScanner();
@@ -306,8 +250,9 @@ public class MainActivity extends Activity {
         setStatus(scanner == null ? "BLE scanner unavailable" : "Ready to scan");
     }
 
-    private void startScanFlow() {
-        if (!hasAllPermissions()) {
+    @SuppressLint("MissingPermission")
+    private void startScan() {
+        if (!hasBlePermissions()) {
             requestPermissions(requiredPermissions(), REQUEST_BLE_PERMISSIONS);
             return;
         }
@@ -319,38 +264,51 @@ public class MainActivity extends Activity {
             setStatus("BLE scanner unavailable");
             return;
         }
-
         closeGatt();
-        commandCharacteristic = null;
+        boardIp = null;
         responseCharacteristic = null;
-        displayedDeviceAddresses.clear();
+        wifiConfigCharacteristic = null;
+        displayedAddresses.clear();
         scanResults.removeAllViews();
-        sendButton.setEnabled(false);
-        setStatus("Scanning for " + TARGET_NAME);
-        appendLog("Scanning");
-        scanButton.setText("Stop");
+        provisionButton.setEnabled(false);
+        frequencyButton.setEnabled(false);
         scanning = true;
+        scanButton.setText("Stop Scan");
+        setStatus("Scanning for " + TARGET_NAME);
         scanner.startScan(scanCallback);
-        mainHandler.postDelayed(this::stopScanIfStillScanning, 12000);
-    }
-
-    private void stopScanIfStillScanning() {
-        if (scanning) {
-            stopScan();
-            setStatus("Scan timed out");
-        }
+        handler.postDelayed(() -> {
+            if (scanning) {
+                stopScan();
+                setStatus("Scan timed out");
+            }
+        }, 12000);
     }
 
     @SuppressLint("MissingPermission")
     private void stopScan() {
-        if (!scanning || scanner == null || !hasScanPermission()) {
-            scanning = false;
-            runOnUiThread(() -> scanButton.setText("Scan"));
+        if (scanning && scanner != null && hasScanPermission()) {
+            scanner.stopScan(scanCallback);
+        }
+        scanning = false;
+        runOnUiThread(() -> scanButton.setText("Scan for Board"));
+    }
+
+    @SuppressLint("MissingPermission")
+    private void showDevice(BluetoothDevice device, String name, int rssi) {
+        String address = device.getAddress();
+        if (!displayedAddresses.add(address)) {
             return;
         }
-        scanner.stopScan(scanCallback);
-        scanning = false;
-        runOnUiThread(() -> scanButton.setText("Scan"));
+        String displayName = name == null || name.isEmpty() ? "Unnamed BLE device" : name;
+        runOnUiThread(() -> {
+            Button button = secondaryButton(displayName + "  " + address + "  " + rssi + " dBm");
+            button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+            button.setOnClickListener(view -> {
+                stopScan();
+                connect(device);
+            });
+            scanResults.addView(button, matchHeightTop(46, 6));
+        });
     }
 
     @SuppressLint("MissingPermission")
@@ -359,89 +317,103 @@ public class MainActivity extends Activity {
             setStatus("Bluetooth connect permission missing");
             return;
         }
-        runOnUiThread(() -> {
-            setStatus("Connecting");
-            deviceText.setText("Device: " + TARGET_NAME);
-            scanButton.setEnabled(false);
-        });
+        setStatus("Connecting");
+        deviceText.setText("Board: " + TARGET_NAME);
         gatt = device.connectGatt(this, false, gattCallback);
     }
 
     @SuppressLint("MissingPermission")
-    private void sendFrequency() {
-        if (gatt == null || commandCharacteristic == null) {
-            setStatus("Connect first");
+    private void subscribeToBoardResponses(BluetoothGatt connectedGatt) {
+        if (!connectedGatt.setCharacteristicNotification(responseCharacteristic, true)) {
+            setStatus("Cannot enable board responses");
             return;
         }
-        if (!hasConnectPermission()) {
-            setStatus("Bluetooth connect permission missing");
+        BluetoothGattDescriptor descriptor = responseCharacteristic.getDescriptor(CCCD_UUID);
+        if (descriptor == null) {
+            setStatus("Response descriptor missing");
             return;
         }
-
-        int value = parseFrequency();
-        if (value < MIN_FREQ_MS || value > MAX_FREQ_MS) {
-            setStatus(String.format(Locale.US, "Use %d-%d ms", MIN_FREQ_MS, MAX_FREQ_MS));
-            return;
+        descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+        if (!connectedGatt.writeDescriptor(descriptor)) {
+            setStatus("Cannot subscribe to board responses");
         }
-
-        String command = "freq " + value;
-        byte[] payload = command.getBytes(StandardCharsets.UTF_8);
-        commandCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-        commandCharacteristic.setValue(payload);
-        boolean accepted = gatt.writeCharacteristic(commandCharacteristic);
-        appendLog(command + (accepted ? " queued" : " not queued"));
-        setStatus(accepted ? "Sending " + command : "Write was not accepted");
     }
 
     @SuppressLint("MissingPermission")
-    private void enableResponseNotifications(BluetoothGatt connectedGatt) {
-        if (responseCharacteristic == null || !hasConnectPermission()) {
-            setStatus("Response characteristic unavailable");
+    private void provisionWifi() {
+        if (gatt == null || wifiConfigCharacteristic == null || !hasConnectPermission()) {
+            setStatus("Connect to the board first");
             return;
         }
-
-        boolean enabled = connectedGatt.setCharacteristicNotification(responseCharacteristic, true);
-        BluetoothGattDescriptor descriptor = responseCharacteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID);
-        if (!enabled || descriptor == null) {
-            setStatus("Unable to enable board responses");
+        String ssid = ssidInput.getText().toString().trim();
+        String password = passwordInput.getText().toString();
+        if (ssid.isEmpty() || password.length() < 8) {
+            setStatus("Enter Wi-Fi name and password");
             return;
         }
-
-        descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-        if (!connectedGatt.writeDescriptor(descriptor)) {
-            setStatus("Unable to subscribe to board responses");
+        wifiConfigCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+        wifiConfigCharacteristic.setValue((ssid + "\n" + password).getBytes(StandardCharsets.UTF_8));
+        if (gatt.writeCharacteristic(wifiConfigCharacteristic)) {
+            setStatus("Connecting board to Wi-Fi");
+            appendLog("Wi-Fi credentials sent; waiting for board IP");
+        } else {
+            setStatus("Wi-Fi configuration was not accepted");
         }
     }
 
-    private int parseFrequency() {
+    private void sendFrequencyOverWifi() {
+        if (boardIp == null || boardIp.isEmpty()) {
+            setStatus("Connect the board to Wi-Fi first");
+            return;
+        }
+        int value;
         try {
-            return Integer.parseInt(frequencyInput.getText().toString().trim());
-        } catch (NumberFormatException ex) {
-            return -1;
+            value = Integer.parseInt(frequencyInput.getText().toString().trim());
+        } catch (NumberFormatException exception) {
+            setStatus("Enter a valid frequency value");
+            return;
         }
+        if (value < MIN_FREQ_MS || value > MAX_FREQ_MS) {
+            setStatus("Use 10 to 60000 ms");
+            return;
+        }
+        String command = "freq " + value;
+        setStatus("Sending over Wi-Fi");
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/frequency").openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setDoOutput(true);
+                connection.getOutputStream().write(command.getBytes(StandardCharsets.UTF_8));
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                appendLog("Wi-Fi: " + response);
+                setStatus(response);
+            } catch (Exception exception) {
+                appendLog("Wi-Fi request failed: " + exception.getMessage());
+                setStatus("Wi-Fi request failed");
+            }
+        });
     }
 
-    private void setFrequency(int value) {
-        frequencyInput.setText(String.valueOf(value));
-        frequencySlider.setProgress(valueToSlider(value));
+    private String readResponse(InputStream stream) throws Exception {
+        if (stream == null) {
+            return "No response";
+        }
+        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
+        StringBuilder response = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            response.append(line);
+        }
+        reader.close();
+        return response.toString();
     }
 
-    private int valueToSlider(int value) {
-        int clamped = Math.max(MIN_FREQ_MS, Math.min(MAX_FREQ_MS, value));
-        double normalized = Math.log10(clamped / 10.0) / Math.log10(MAX_FREQ_MS / 10.0);
-        return (int) Math.round(normalized * frequencySliderMax());
-    }
-
-    private int sliderToValue(int progress) {
-        double normalized = progress / (double) frequencySliderMax();
-        double value = 10.0 * Math.pow(MAX_FREQ_MS / 10.0, normalized);
-        return Math.max(MIN_FREQ_MS, Math.min(MAX_FREQ_MS, (int) Math.round(value)));
-    }
-
-    private int frequencySliderMax() {
-        return 4990;
-    }
-
+    @SuppressLint("MissingPermission")
     private void closeGatt() {
         if (gatt != null && hasConnectPermission()) {
             gatt.close();
@@ -449,40 +421,19 @@ public class MainActivity extends Activity {
         gatt = null;
     }
 
-    private String getDeviceName(BluetoothDevice device) {
-        if (!hasConnectPermission()) {
-            return null;
-        }
-        return device.getName();
-    }
-
-    private String getAdvertisedName(ScanResult result, BluetoothDevice device) {
-        if (result.getScanRecord() != null && result.getScanRecord().getDeviceName() != null) {
-            return result.getScanRecord().getDeviceName();
-        }
-        return getDeviceName(device);
-    }
-
-    private void showScanResult(BluetoothDevice device, String name, int rssi) {
-        String address = device.getAddress();
-        if (!displayedDeviceAddresses.add(address)) {
-            return;
-        }
-
-        String displayName = name == null || name.isEmpty() ? "Unnamed BLE device" : name;
+    private void clearConnection(String status) {
+        boardIp = null;
+        responseCharacteristic = null;
+        wifiConfigCharacteristic = null;
         runOnUiThread(() -> {
-            Button resultButton = secondaryButton(displayName + "  " + address + "  " + rssi + " dBm");
-            resultButton.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-            resultButton.setOnClickListener(view -> {
-                stopScan();
-                connect(device);
-            });
-            scanResults.addView(resultButton, matchHeightTop(48, 6));
-            setStatus("Found " + displayedDeviceAddresses.size() + " device(s)");
+            deviceText.setText("Board: not connected");
+            provisionButton.setEnabled(false);
+            frequencyButton.setEnabled(false);
         });
+        setStatus(status);
     }
 
-    private boolean hasAllPermissions() {
+    private boolean hasBlePermissions() {
         for (String permission : requiredPermissions()) {
             if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
                 return false;
@@ -492,54 +443,54 @@ public class MainActivity extends Activity {
     }
 
     private boolean hasScanPermission() {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-                checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S || checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
     }
 
     private boolean hasConnectPermission() {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
     }
 
     private String[] requiredPermissions() {
-        List<String> permissions = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissions.add(Manifest.permission.BLUETOOTH_SCAN);
-            permissions.add(Manifest.permission.BLUETOOTH_CONNECT);
-        } else {
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION);
+            return new String[]{Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT};
         }
-        return permissions.toArray(new String[0]);
+        return new String[]{Manifest.permission.ACCESS_FINE_LOCATION};
     }
 
-    private void setStatus(String text) {
-        runOnUiThread(() -> statusText.setText("Status: " + text));
+    private void setStatus(String status) {
+        runOnUiThread(() -> statusText.setText("Status: " + status));
     }
 
     private void appendLog(String text) {
         runOnUiThread(() -> {
-            String existing = logText.getText().toString();
-            String next = existing.isEmpty() ? text : existing + "\n" + text;
-            logText.setText(next);
+            String old = logText.getText().toString();
+            logText.setText(old.isEmpty() ? text : old + "\n" + text);
         });
     }
 
-    private TextView label(String text, int sp, boolean bold) {
+    private TextView label(String text, int size, boolean bold) {
         TextView view = new TextView(this);
         view.setText(text);
         view.setTextColor(0xff1f2933);
-        view.setTextSize(sp);
+        view.setTextSize(size);
         if (bold) {
             view.setTypeface(Typeface.DEFAULT_BOLD);
         }
         return view;
     }
 
+    private EditText input(String hint, int type) {
+        EditText input = new EditText(this);
+        input.setHint(hint);
+        input.setSingleLine(true);
+        input.setInputType(type);
+        return input;
+    }
+
     private Button primaryButton(String text) {
         Button button = new Button(this);
         button.setText(text);
         button.setTextColor(0xffffffff);
-        button.setTextSize(15);
         button.setAllCaps(false);
         button.setBackgroundColor(0xff0b6e69);
         return button;
@@ -549,7 +500,6 @@ public class MainActivity extends Activity {
         Button button = new Button(this);
         button.setText(text);
         button.setTextColor(0xff0b6e69);
-        button.setTextSize(14);
         button.setAllCaps(false);
         button.setBackgroundColor(0xffffffff);
         return button;
@@ -559,15 +509,15 @@ public class MainActivity extends Activity {
         return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
     }
 
-    private LinearLayout.LayoutParams matchWrapTop(int topDp) {
+    private LinearLayout.LayoutParams matchWrapTop(int top) {
         LinearLayout.LayoutParams params = matchWrap();
-        params.topMargin = dp(topDp);
+        params.topMargin = dp(top);
         return params;
     }
 
-    private LinearLayout.LayoutParams matchHeightTop(int heightDp, int topDp) {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(heightDp));
-        params.topMargin = dp(topDp);
+    private LinearLayout.LayoutParams matchHeightTop(int height, int top) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(height));
+        params.topMargin = dp(top);
         return params;
     }
 
