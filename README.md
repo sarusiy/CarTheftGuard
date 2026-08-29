@@ -11,6 +11,7 @@ Firmware endpoint:
 - BLE device name: `JC-P4-C6`
 - Service UUID: `0xFFF0`
 - Write characteristic UUID: `0xFFF1`
+- Response characteristic UUID: `0xFFF2` (read and notify)
 - Command payload: UTF-8 text, for example `freq 250`
 - Valid range: `freq 10` through `freq 60000`
 
@@ -26,7 +27,7 @@ C:\projects\CarTheftGuard
 
 Then let Android Studio sync Gradle and run the `app` configuration on an Android phone.
 
-This machine currently does not expose Java, Gradle, Android SDK, or adb on `PATH`, so command-line build/install validation was not available from VS Code. Android Studio can provide the JDK, Gradle, SDK, and device deployment path.
+The Gradle wrapper builds the debug APK with JDK 17. Android Studio can install it directly to a connected phone.
 
 ## Phone setup
 
@@ -51,14 +52,13 @@ freq 500
 freq 1000
 ```
 
-The LED should change blink speed immediately. The firmware serial monitor should print a line like:
+The LED should change blink speed immediately. The app waits for the board's `0xFFF2` notification and displays the actual response, for example:
 
 ```text
-BLE cmd 'freq 250' -> OK
+OK freq=250 ms
 ```
 
 ## Next work
 
-- Add a firmware response characteristic, likely `0xFFF2`, for read/notify status text.
-- Show board responses in the Android app instead of only local write status.
+- Validate `OK` and `ERR` notifications from the board on a phone.
 - Add BLE-based Wi-Fi provisioning for SSID/password after LED control is stable.

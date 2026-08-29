@@ -8,6 +8,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
@@ -33,14 +34,18 @@ import android.widget.TextView;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
     private static final String TARGET_NAME = "JC-P4-C6";
     private static final UUID SERVICE_UUID = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb");
     private static final UUID COMMAND_UUID = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb");
+    private static final UUID RESPONSE_UUID = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb");
+    private static final UUID CLIENT_CHARACTERISTIC_CONFIG_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private static final int REQUEST_BLE_PERMISSIONS = 42;
     private static final int MIN_FREQ_MS = 10;
     private static final int MAX_FREQ_MS = 60000;
@@ -52,7 +57,9 @@ public class MainActivity extends Activity {
     private BluetoothLeScanner scanner;
     private BluetoothGatt gatt;
     private BluetoothGattCharacteristic commandCharacteristic;
+    private BluetoothGattCharacteristic responseCharacteristic;
     private boolean scanning;
+    private final Set<String> displayedDeviceAddresses = new HashSet<>();
 
     private TextView statusText;
     private TextView deviceText;
@@ -61,12 +68,14 @@ public class MainActivity extends Activity {
     private Button scanButton;
     private Button sendButton;
     private TextView logText;
+    private LinearLayout scanResults;
 
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override
         public void onScanResult(int callbackType, ScanResult result) {
             BluetoothDevice device = result.getDevice();
             String name = getAdvertisedName(result, device);
+            showScanResult(device, name, result.getRssi());
             if (TARGET_NAME.equals(name)) {
                 appendLog("Found " + TARGET_NAME);
                 stopScan();
@@ -95,6 +104,7 @@ public class MainActivity extends Activity {
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 commandCharacteristic = null;
+                responseCharacteristic = null;
                 appendLog("Disconnected");
                 setStatus("Disconnected");
                 runOnUiThread(() -> {
@@ -120,26 +130,45 @@ public class MainActivity extends Activity {
             }
 
             commandCharacteristic = service.getCharacteristic(COMMAND_UUID);
-            if (commandCharacteristic == null) {
-                setStatus("Characteristic 0xFFF1 not found");
+            responseCharacteristic = service.getCharacteristic(RESPONSE_UUID);
+            if (commandCharacteristic == null || responseCharacteristic == null) {
+                setStatus("Firmware response service is not available");
                 return;
             }
 
-            appendLog("Service 0xFFF0 and characteristic 0xFFF1 ready");
-            runOnUiThread(() -> {
-                setStatus("Ready");
-                sendButton.setEnabled(true);
-            });
+            enableResponseNotifications(gatt);
+        }
+
+        @Override
+        public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
+            if (CLIENT_CHARACTERISTIC_CONFIG_UUID.equals(descriptor.getUuid()) && status == BluetoothGatt.GATT_SUCCESS) {
+                appendLog("Board response notifications enabled");
+                runOnUiThread(() -> {
+                    setStatus("Ready");
+                    sendButton.setEnabled(true);
+                });
+            } else {
+                setStatus("Response notification setup failed: " + status);
+            }
         }
 
         @Override
         public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                setStatus("Command sent");
-                appendLog("Write OK");
+                setStatus("Command sent; waiting for board");
+                appendLog("Write accepted; waiting for board response");
             } else {
                 setStatus("Write failed: " + status);
                 appendLog("Write failed: " + status);
+            }
+        }
+
+        @Override
+        public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
+            if (RESPONSE_UUID.equals(characteristic.getUuid())) {
+                String response = new String(characteristic.getValue(), StandardCharsets.UTF_8).trim();
+                appendLog("Board: " + response);
+                setStatus(response);
             }
         }
     };
@@ -179,7 +208,7 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(0xfff5f2ea);
 
         TextView title = new TextView(this);
-        title.setText("CarTheftGuard");
+        title.setText("CarTheftGuard v0.1.2");
         title.setTextColor(0xff1f2933);
         title.setTextSize(28);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -194,6 +223,10 @@ public class MainActivity extends Activity {
         scanButton = primaryButton("Scan");
         scanButton.setOnClickListener(view -> startScanFlow());
         root.addView(scanButton, matchHeightTop(52, 24));
+
+        scanResults = new LinearLayout(this);
+        scanResults.setOrientation(LinearLayout.VERTICAL);
+        root.addView(scanResults, matchWrapTop(12));
 
         TextView freqLabel = label("Blink half-period", 16, true);
         root.addView(freqLabel, matchWrapTop(28));
@@ -289,6 +322,9 @@ public class MainActivity extends Activity {
 
         closeGatt();
         commandCharacteristic = null;
+        responseCharacteristic = null;
+        displayedDeviceAddresses.clear();
+        scanResults.removeAllViews();
         sendButton.setEnabled(false);
         setStatus("Scanning for " + TARGET_NAME);
         appendLog("Scanning");
@@ -357,6 +393,26 @@ public class MainActivity extends Activity {
         setStatus(accepted ? "Sending " + command : "Write was not accepted");
     }
 
+    @SuppressLint("MissingPermission")
+    private void enableResponseNotifications(BluetoothGatt connectedGatt) {
+        if (responseCharacteristic == null || !hasConnectPermission()) {
+            setStatus("Response characteristic unavailable");
+            return;
+        }
+
+        boolean enabled = connectedGatt.setCharacteristicNotification(responseCharacteristic, true);
+        BluetoothGattDescriptor descriptor = responseCharacteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID);
+        if (!enabled || descriptor == null) {
+            setStatus("Unable to enable board responses");
+            return;
+        }
+
+        descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+        if (!connectedGatt.writeDescriptor(descriptor)) {
+            setStatus("Unable to subscribe to board responses");
+        }
+    }
+
     private int parseFrequency() {
         try {
             return Integer.parseInt(frequencyInput.getText().toString().trim());
@@ -405,6 +461,25 @@ public class MainActivity extends Activity {
             return result.getScanRecord().getDeviceName();
         }
         return getDeviceName(device);
+    }
+
+    private void showScanResult(BluetoothDevice device, String name, int rssi) {
+        String address = device.getAddress();
+        if (!displayedDeviceAddresses.add(address)) {
+            return;
+        }
+
+        String displayName = name == null || name.isEmpty() ? "Unnamed BLE device" : name;
+        runOnUiThread(() -> {
+            Button resultButton = secondaryButton(displayName + "  " + address + "  " + rssi + " dBm");
+            resultButton.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+            resultButton.setOnClickListener(view -> {
+                stopScan();
+                connect(device);
+            });
+            scanResults.addView(resultButton, matchHeightTop(48, 6));
+            setStatus("Found " + displayedDeviceAddresses.size() + " device(s)");
+        });
     }
 
     private boolean hasAllPermissions() {
