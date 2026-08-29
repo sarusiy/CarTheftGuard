@@ -4,7 +4,7 @@ Android control app for the JC-ESP32P4-M3 board.
 
 ## Current milestone
 
-The first app screen controls the ESP32-P4 LED blink half-period over BLE.
+The first app screen controls the ESP32-P4 LED blink half-period over BLE. Android scan, connection, command write, and visible LED timing change are confirmed on hardware.
 
 Firmware endpoint:
 
@@ -57,6 +57,8 @@ The LED should change blink speed immediately. The app waits for the board's `0x
 ```text
 OK freq=250 ms
 ```
+
+The screen title must show `CarTheftGuard v0.1.2`; this identifies the version that lists all discovered BLE devices and subscribes to the response characteristic.
 
 ## Next work
 
