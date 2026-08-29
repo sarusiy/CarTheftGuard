@@ -246,7 +246,7 @@ public class MainActivity extends Activity {
         root.setPadding(dp(20), dp(20), dp(20), dp(20));
         root.setBackgroundColor(0xfff5f2ea);
 
-        root.addView(label("CarTheftGuard v0.2.4", 28, true), matchWrap());
+        root.addView(label("CarTheftGuard v0.2.5", 28, true), matchWrap());
         statusText = label("Status: idle", 17, true);
         root.addView(statusText, matchWrapTop(16));
         deviceText = label("Board: not connected", 14, false);
