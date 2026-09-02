@@ -1,0 +1,18 @@
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/nav_connect"
+        android:icon="@android:drawable/stat_sys_data_bluetooth"
+        android:title="Connect" />
+    <item
+        android:id="@+id/nav_monitor"
+        android:icon="@android:drawable/ic_menu_view"
+        android:title="Monitor" />
+    <item
+        android:id="@+id/nav_control"
+        android:icon="@android:drawable/ic_menu_preferences"
+        android:title="Control" />
+    <item
+        android:id="@+id/nav_about"
+        android:icon="@android:drawable/ic_menu_info_details"
+        android:title="About" />
+</menu>

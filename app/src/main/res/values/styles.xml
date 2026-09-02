@@ -1,9 +1,12 @@
 <resources>
-    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+    <style name="AppTheme" parent="Theme.MaterialComponents.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowBackground">@color/ctg_background</item>
         <item name="android:navigationBarColor">@color/ctg_background</item>
         <item name="android:statusBarColor">@color/ctg_accent_dark</item>
         <item name="android:windowLightStatusBar">false</item>
+        <item name="colorPrimary">@color/ctg_accent</item>
+        <item name="colorPrimaryDark">@color/ctg_accent_dark</item>
+        <item name="colorAccent">@color/ctg_accent</item>
     </style>
 </resources>
