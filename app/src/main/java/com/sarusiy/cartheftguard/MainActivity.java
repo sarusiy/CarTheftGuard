@@ -14,6 +14,7 @@ import com.sarusiy.cartheftguard.ui.AboutFragment;
 import com.sarusiy.cartheftguard.ui.ConnectFragment;
 import com.sarusiy.cartheftguard.ui.ControlFragment;
 import com.sarusiy.cartheftguard.ui.MonitorFragment;
+import com.sarusiy.cartheftguard.ui.RecordFragment;
 
 /**
  * Thin host Activity: owns the bottom navigation bar and swaps between the
@@ -63,6 +64,9 @@ public class MainActivity extends AppCompatActivity {
         }
         if (itemId == R.id.nav_control) {
             return new ControlFragment();
+        }
+        if (itemId == R.id.nav_record) {
+            return new RecordFragment();
         }
         if (itemId == R.id.nav_about) {
             return new AboutFragment();

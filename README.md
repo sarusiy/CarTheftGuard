@@ -4,7 +4,7 @@ Android control app for the JC-ESP32P4-M3 board.
 
 ## Current milestone
 
-BLE scan/connect, Wi-Fi provisioning over BLE, and frequency control over the local Wi-Fi network's HTTP API are all validated end-to-end on hardware. The Android app connects over BLE, sends Wi-Fi credentials, waits for the board to join the network and report its IP, then sends `freq <ms>` commands directly over Wi-Fi (BLE is only used for provisioning and status, not for the actual frequency commands).
+BLE scan/connect, Wi-Fi provisioning over BLE, and frequency control over the local Wi-Fi network's HTTP API are validated end-to-end on hardware. The app also displays decoded OBD data and now includes a Record tab that starts a foreground raw-CAN recorder, writes timestamped CSV files, reports dropped/overflowed frames, and lists recent recordings. The new CAN recording path still needs build and hardware validation.
 
 Firmware endpoint:
 
@@ -46,6 +46,10 @@ The Gradle wrapper builds the debug APK with JDK 17. Android Studio can install 
 6. Wait for `Wi-Fi ready: <board-ip>`.
 7. Choose a preset or enter a half-period in milliseconds.
 8. Tap `Send Frequency Over Wi-Fi`.
+9. Open the `Record` tab.
+10. Keep `Passive listen-only` selected for a real vehicle. Clear it for the two-node Arduino simulator, where active OBD requests are required.
+11. Tap `Start recording` to save raw CAN traffic.
+12. Tap `Stop recording`; the file appears under `Saved recordings`.
 
 Android may ask for Location permission before it can display the Wi-Fi network list. Enable Wi-Fi and Location services on the phone, then tap `Refresh Wi-Fi Networks`. Android may throttle repeated Wi-Fi scans; when that happens the app shows the latest available list.
 
@@ -73,7 +77,11 @@ The LED should change blink speed immediately. The app waits for the board's `0x
 OK freq=250 ms
 ```
 
-The screen title shows the current app version, currently `CarTheftGuard v0.2.8`.
+CAN recordings are stored as CSV under the app-specific external
+`can-captures` directory. Each row includes phone time, P4 time, sequence,
+bus, CAN ID, frame flags, DLC, and raw payload. The app configures the P4
+through `POST /api/can/mode` before recording and reports both ring-buffer
+losses and MCP2515 hardware-overflow events.
 
 ## Next work
 

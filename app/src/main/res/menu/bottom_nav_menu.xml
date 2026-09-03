@@ -12,6 +12,10 @@
         android:icon="@android:drawable/ic_menu_preferences"
         android:title="Control" />
     <item
+        android:id="@+id/nav_record"
+        android:icon="@android:drawable/ic_menu_save"
+        android:title="Record" />
+    <item
         android:id="@+id/nav_about"
         android:icon="@android:drawable/ic_menu_info_details"
         android:title="About" />
