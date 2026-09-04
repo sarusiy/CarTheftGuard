@@ -1,6 +1,8 @@
 package com.sarusiy.cartheftguard.ui;
 
 import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -25,10 +27,12 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /** "Monitor" tab: latest OBD-II values read by the P4 over CAN, with visibility filters. */
 public class MonitorFragment extends Fragment implements BoardLink.Listener {
+    private static final int POLL_INTERVAL_MS = 1000;
 
     private static final class Metric {
         final String id;
@@ -49,12 +53,18 @@ public class MonitorFragment extends Fragment implements BoardLink.Listener {
     private BoardLink boardLink;
     private LinearLayout boxGrid;
     private TextView noteText;
+    private Button openMapButton;
+    private Button navigateButton;
+    private boolean latestGpsFixValid;
+    private double latestGpsLat;
+    private double latestGpsLon;
     private final Runnable pollRunnable = new Runnable() {
         @Override
         public void run() {
             if (isAdded()) {
                 boardLink.fetchObdData();
-                handler.postDelayed(this, 500);
+                boardLink.fetchGpsData();
+                handler.postDelayed(this, POLL_INTERVAL_MS);
             }
         }
     };
@@ -65,6 +75,12 @@ public class MonitorFragment extends Fragment implements BoardLink.Listener {
         addMetric("rpm", "Engine RPM", "rpm");
         addMetric("speed", "Vehicle Speed", "km/h");
         addMetric("throttle", "Throttle Position", "%");
+        addMetric("gps_fix", "GPS Fix", "state");
+        addMetric("gps_lat", "GPS Latitude", "degrees");
+        addMetric("gps_lon", "GPS Longitude", "degrees");
+        addMetric("gps_speed", "GPS Speed", "km/h");
+        addMetric("gps_heading", "GPS Heading", "degrees");
+        addMetric("gps_sats", "GPS Satellites", "count");
     }
 
     @Override
@@ -126,6 +142,20 @@ public class MonitorFragment extends Fragment implements BoardLink.Listener {
         boxGrid = new LinearLayout(context);
         boxGrid.setOrientation(LinearLayout.VERTICAL);
         root.addView(boxGrid, Views.matchWrapTop(context, 20));
+
+        LinearLayout gpsActions = new LinearLayout(context);
+        gpsActions.setOrientation(LinearLayout.HORIZONTAL);
+        openMapButton = new Button(context);
+        openMapButton.setText("Open map");
+        openMapButton.setEnabled(false);
+        openMapButton.setOnClickListener(view -> openCurrentGpsInMap(false));
+        gpsActions.addView(openMapButton, rowCellParams(context));
+        navigateButton = new Button(context);
+        navigateButton.setText("Navigate");
+        navigateButton.setEnabled(false);
+        navigateButton.setOnClickListener(view -> openCurrentGpsInMap(true));
+        gpsActions.addView(navigateButton, rowCellParams(context));
+        root.addView(gpsActions, Views.matchWrapTop(context, 16));
 
         noteText = Views.label(context, "", 12, false);
         noteText.setTextColor(0xff52616b);
@@ -194,6 +224,28 @@ public class MonitorFragment extends Fragment implements BoardLink.Listener {
         return box;
     }
 
+    private void openCurrentGpsInMap(boolean navigation) {
+        if (!latestGpsFixValid) {
+            noteText.setText("Waiting for a valid GPS fix from the P4.");
+            return;
+        }
+
+        String coordinate = String.format(Locale.US, "%.6f,%.6f", latestGpsLat, latestGpsLon);
+        Uri uri = navigation
+                ? Uri.parse("google.navigation:q=" + coordinate + "&mode=d")
+                : Uri.parse("geo:" + coordinate + "?q=" + coordinate + "(CarTheftGuard)");
+        Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+        intent.setPackage("com.google.android.apps.maps");
+        if (intent.resolveActivity(requireContext().getPackageManager()) == null) {
+            intent.setPackage(null);
+        }
+        try {
+            startActivity(intent);
+        } catch (Exception exception) {
+            noteText.setText("No maps app is available on this phone.");
+        }
+    }
+
     @Override
     public void onObdData(String json) {
         try {
@@ -207,6 +259,31 @@ public class MonitorFragment extends Fragment implements BoardLink.Listener {
             renderBoxes();
         } catch (JSONException exception) {
             noteText.setText("Invalid OBD data received from the P4.");
+        }
+    }
+
+    @Override
+    public void onGpsData(String json) {
+        try {
+            JSONObject data = new JSONObject(json);
+            boolean fixValid = data.optBoolean("fix_valid", false);
+            latestGpsFixValid = fixValid;
+            latestGpsLat = data.optDouble("lat", 0);
+            latestGpsLon = data.optDouble("lon", 0);
+            metrics.get("gps_fix").value = fixValid ? "Valid" : "Waiting";
+            metrics.get("gps_lat").value = fixValid ? String.format(Locale.US, "%.6f", latestGpsLat) : "--";
+            metrics.get("gps_lon").value = fixValid ? String.format(Locale.US, "%.6f", latestGpsLon) : "--";
+            metrics.get("gps_speed").value = fixValid ? String.format(Locale.US, "%.1f", data.optDouble("speed_kmh", 0)) : "--";
+            metrics.get("gps_heading").value = fixValid ? String.format(Locale.US, "%.1f", data.optDouble("heading_deg", 0)) : "--";
+            metrics.get("gps_sats").value = String.valueOf(data.optInt("satellites", 0));
+            if (openMapButton != null && navigateButton != null) {
+                openMapButton.setEnabled(fixValid);
+                navigateButton.setEnabled(fixValid);
+            }
+            noteText.setText("Live CAN/GPS data from " + boardLink.getBoardIp());
+            renderBoxes();
+        } catch (JSONException exception) {
+            noteText.setText("Invalid GPS data received from the P4.");
         }
     }
 }

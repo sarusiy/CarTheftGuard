@@ -38,6 +38,7 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Owns the board's BLE connection, Wi-Fi provisioning, and frequency-over-Wi-Fi
@@ -68,6 +69,7 @@ public final class BoardLink {
         default void onWifiConnected(String boardIp) {}
         default void onWifiNetworksUpdated(List<android.net.wifi.ScanResult> results) {}
         default void onObdData(String json) {}
+        default void onGpsData(String json) {}
     }
 
     private static volatile BoardLink instance;
@@ -97,6 +99,8 @@ public final class BoardLink {
     private boolean scanning;
     private boolean wifiReceiverRegistered;
     private volatile String boardIp;
+    private final AtomicBoolean obdFetchInFlight = new AtomicBoolean(false);
+    private final AtomicBoolean gpsFetchInFlight = new AtomicBoolean(false);
 
     private final BroadcastReceiver wifiScanReceiver = new BroadcastReceiver() {
         @Override
@@ -437,6 +441,9 @@ public final class BoardLink {
         if (!isWifiReady()) {
             return;
         }
+        if (!obdFetchInFlight.compareAndSet(false, true)) {
+            return;
+        }
         networkExecutor.execute(() -> {
             try {
                 HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/obd").openConnection();
@@ -457,6 +464,41 @@ public final class BoardLink {
                 });
             } catch (Exception exception) {
                 emitLog("OBD monitor request failed: " + exception.getMessage());
+            } finally {
+                obdFetchInFlight.set(false);
+            }
+        });
+    }
+
+    public void fetchGpsData() {
+        if (!isWifiReady()) {
+            return;
+        }
+        if (!gpsFetchInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/gps").openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                if (code >= 400) {
+                    emitLog("GPS monitor request failed: HTTP " + code);
+                    return;
+                }
+                post(() -> {
+                    for (Listener listener : listeners) {
+                        listener.onGpsData(response);
+                    }
+                });
+            } catch (Exception exception) {
+                emitLog("GPS monitor request failed: " + exception.getMessage());
+            } finally {
+                gpsFetchInFlight.set(false);
             }
         });
     }

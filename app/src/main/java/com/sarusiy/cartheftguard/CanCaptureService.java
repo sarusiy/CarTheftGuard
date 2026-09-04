@@ -44,12 +44,36 @@ public final class CanCaptureService extends Service {
 
     private static final String CHANNEL_ID = "can_capture";
     private static final int NOTIFICATION_ID = 1201;
+    private static final long GPS_RECORDING_POLL_MS = 1000;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile boolean recording;
     private long frameCount;
     private long droppedCount;
     private String filePath = "";
+    private GpsSnapshot gpsSnapshot = GpsSnapshot.empty();
+
+    private static final class GpsSnapshot {
+        final boolean fixValid;
+        final double lat;
+        final double lon;
+        final double speedKmh;
+        final double headingDeg;
+        final int satellites;
+
+        GpsSnapshot(boolean fixValid, double lat, double lon, double speedKmh, double headingDeg, int satellites) {
+            this.fixValid = fixValid;
+            this.lat = lat;
+            this.lon = lon;
+            this.speedKmh = speedKmh;
+            this.headingDeg = headingDeg;
+            this.satellites = satellites;
+        }
+
+        static GpsSnapshot empty() {
+            return new GpsSnapshot(false, 0, 0, 0, 0, 0);
+        }
+    }
 
     @Override
     public void onCreate() {
@@ -100,12 +124,13 @@ public final class CanCaptureService extends Service {
             File file = new File(directory, "can-" + stamp + ".csv");
             filePath = file.getAbsolutePath();
             writer = new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8);
-            writer.write("phone_time_ms,board_time_us,sequence,bus,can_id,extended,rtr,dlc,data_hex\n");
+            writer.write("phone_time_ms,board_time_us,sequence,bus,can_id,extended,rtr,dlc,data_hex,gps_fix,gps_lat,gps_lon,gps_speed_kmh,gps_heading_deg,gps_satellites\n");
 
             JSONObject initialState = fetchBatch(boardIp, 0);
             long after = initialState.optLong("latest", 0);
             long lastHardwareOverflow = initialState.optLong("hardware_overflow", 0);
             long lastStatusMs = 0;
+            long lastGpsMs = 0;
             while (recording) {
                 JSONObject response = fetchBatch(boardIp, after);
                 droppedCount += response.optLong("dropped", 0);
@@ -114,10 +139,16 @@ public final class CanCaptureService extends Service {
                     droppedCount += hardwareOverflow - lastHardwareOverflow;
                 }
                 lastHardwareOverflow = hardwareOverflow;
+                long now = System.currentTimeMillis();
+                if (now - lastGpsMs >= GPS_RECORDING_POLL_MS) {
+                    gpsSnapshot = fetchGpsSnapshot(boardIp);
+                    lastGpsMs = now;
+                }
                 JSONArray frames = response.getJSONArray("frames");
                 for (int index = 0; index < frames.length(); index++) {
                     JSONObject frame = frames.getJSONObject(index);
                     long sequence = frame.getLong("seq");
+                    GpsSnapshot gps = gpsSnapshot;
                     writer.write(System.currentTimeMillis() + ","
                             + frame.getLong("time_us") + ","
                             + sequence + ","
@@ -126,7 +157,13 @@ public final class CanCaptureService extends Service {
                             + frame.optBoolean("extended", false) + ","
                             + frame.optBoolean("rtr", false) + ","
                             + frame.getInt("dlc") + ","
-                            + frame.getString("data") + "\n");
+                            + frame.getString("data") + ","
+                            + gps.fixValid + ","
+                            + String.format(Locale.US, "%.6f", gps.lat) + ","
+                            + String.format(Locale.US, "%.6f", gps.lon) + ","
+                            + String.format(Locale.US, "%.1f", gps.speedKmh) + ","
+                            + String.format(Locale.US, "%.1f", gps.headingDeg) + ","
+                            + gps.satellites + "\n");
                     after = sequence;
                     frameCount++;
                 }
@@ -135,7 +172,6 @@ public final class CanCaptureService extends Service {
                     Thread.sleep(100);
                 }
 
-                long now = System.currentTimeMillis();
                 if (now - lastStatusMs >= 1000) {
                     writer.flush();
                     lastStatusMs = now;
@@ -204,6 +240,42 @@ public final class CanCaptureService extends Service {
             throw new IllegalStateException("Capture request failed: HTTP " + code);
         }
         return new JSONObject(body.toString());
+    }
+
+    private GpsSnapshot fetchGpsSnapshot(String boardIp) {
+        try {
+            HttpURLConnection connection = (HttpURLConnection) new URL(
+                    "http://" + boardIp + "/api/gps").openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(1000);
+            connection.setReadTimeout(1000);
+            int code = connection.getResponseCode();
+            InputStream stream = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
+            StringBuilder body = new StringBuilder();
+            if (stream != null) {
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        body.append(line);
+                    }
+                }
+            }
+            connection.disconnect();
+            if (code >= 400) {
+                return gpsSnapshot;
+            }
+            JSONObject gps = new JSONObject(body.toString());
+            return new GpsSnapshot(
+                    gps.optBoolean("fix_valid", false),
+                    gps.optDouble("lat", 0),
+                    gps.optDouble("lon", 0),
+                    gps.optDouble("speed_kmh", 0),
+                    gps.optDouble("heading_deg", 0),
+                    gps.optInt("satellites", 0));
+        } catch (Exception exception) {
+            return gpsSnapshot;
+        }
     }
 
     private Notification buildNotification(String text) {

@@ -8,6 +8,10 @@
         android:icon="@android:drawable/ic_menu_view"
         android:title="Monitor" />
     <item
+        android:id="@+id/nav_track"
+        android:icon="@android:drawable/ic_dialog_map"
+        android:title="Track" />
+    <item
         android:id="@+id/nav_control"
         android:icon="@android:drawable/ic_menu_preferences"
         android:title="Control" />
@@ -15,8 +19,4 @@
         android:id="@+id/nav_record"
         android:icon="@android:drawable/ic_menu_save"
         android:title="Record" />
-    <item
-        android:id="@+id/nav_about"
-        android:icon="@android:drawable/ic_menu_info_details"
-        android:title="About" />
 </menu>
