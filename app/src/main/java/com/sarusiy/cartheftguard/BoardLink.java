@@ -196,6 +196,16 @@ public final class BoardLink {
                     }
                 });
                 emitStatus("Checking Wi-Fi status...", COLOR_DEFAULT);
+                /* Actively read the response characteristic's current value
+                 * right away, rather than relying solely on the firmware's
+                 * notify push (which is fire-and-forget and can be dropped,
+                 * especially with MTU negotiation/service discovery/this very
+                 * CCCD write all still settling around the same moment).
+                 * The read is answered in onCharacteristicRead above and
+                 * reuses the exact same handleBoardResponseText() parsing. */
+                if (hasConnectPermission() && responseCharacteristic != null) {
+                    connectedGatt.readCharacteristic(responseCharacteristic);
+                }
                 /* Don't show the Wi-Fi setup form immediately: the firmware
                  * resends "WiFi connected ip=..." right after this subscribe
                  * completes if it's already on a known network (see
@@ -231,7 +241,30 @@ public final class BoardLink {
             if (!RESPONSE_UUID.equals(characteristic.getUuid())) {
                 return;
             }
-            String response = new String(characteristic.getValue(), StandardCharsets.UTF_8).trim();
+            handleBoardResponseText(new String(characteristic.getValue(), StandardCharsets.UTF_8).trim());
+        }
+
+        @Override
+        public void onCharacteristicRead(BluetoothGatt connectedGatt, BluetoothGattCharacteristic characteristic, int status) {
+            /* Explicit read fallback for the same response characteristic
+             * handled by onCharacteristicChanged above. BLE notifications are
+             * fire-and-forget with no delivery guarantee at the app layer,
+             * and can be silently dropped when other GATT operations (MTU
+             * negotiation, service discovery, the CCCD write itself) are
+             * still settling right around subscribe time -- exactly when the
+             * firmware's one-shot "WiFi connected ip=..." push fires. A
+             * direct read is a deterministic request/response instead, so it
+             * reliably retrieves the board's last published message even if
+             * the notification for it never arrived. Triggered right after
+             * the CCCD write succeeds, see onDescriptorWrite below. */
+            if (!RESPONSE_UUID.equals(characteristic.getUuid()) || status != BluetoothGatt.GATT_SUCCESS) {
+                return;
+            }
+            handleBoardResponseText(new String(characteristic.getValue(), StandardCharsets.UTF_8).trim());
+        }
+    };
+
+    private void handleBoardResponseText(String response) {
             emitLog("Board: " + response);
             if (response.startsWith("WiFi connected ip=")) {
                 boardIp = response.substring("WiFi connected ip=".length()).trim();
@@ -256,8 +289,7 @@ public final class BoardLink {
             } else {
                 emitStatus(response, response.startsWith("ERR") ? COLOR_ERROR : COLOR_DEFAULT);
             }
-        }
-    };
+    }
 
     private BoardLink(Context appContext) {
         this.appContext = appContext;
