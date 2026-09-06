@@ -26,6 +26,8 @@ import android.os.Looper;
 
 import androidx.core.content.ContextCompat;
 
+import org.json.JSONObject;
+
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -39,6 +41,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 /**
  * Owns the board's BLE connection, Wi-Fi provisioning, and frequency-over-Wi-Fi
@@ -101,6 +104,13 @@ public final class BoardLink {
     private volatile String boardIp;
     private final AtomicBoolean obdFetchInFlight = new AtomicBoolean(false);
     private final AtomicBoolean gpsFetchInFlight = new AtomicBoolean(false);
+    /* Set right after BLE subscribe completes, cleared once we know the actual
+     * Wi-Fi state (either an already-connected IP arrives, or the grace period
+     * below elapses with nothing). Lets onWifiConnected cancel the pending
+     * "show Wi-Fi setup" prompt below if the board turns out to already be
+     * on a known network, instead of always flashing that form on every
+     * connect regardless of whether it's actually needed. */
+    private Runnable pendingWifiSetupPrompt;
 
     private final BroadcastReceiver wifiScanReceiver = new BroadcastReceiver() {
         @Override
@@ -183,10 +193,34 @@ public final class BoardLink {
                 post(() -> {
                     for (Listener listener : listeners) {
                         listener.onBoardConnectionChanged(true);
-                        listener.onWifiSetupReady();
                     }
                 });
-                emitStatus("Enter Wi-Fi settings", COLOR_SUCCESS);
+                emitStatus("Checking Wi-Fi status...", COLOR_DEFAULT);
+                /* Don't show the Wi-Fi setup form immediately: the firmware
+                 * resends "WiFi connected ip=..." right after this subscribe
+                 * completes if it's already on a known network (see
+                 * ble_gap_event's BLE_GAP_EVENT_SUBSCRIBE handling on the P4).
+                 * Give that a short grace period to arrive -- if it does,
+                 * onWifiConnected cancels this runnable below and the user
+                 * never sees an unnecessary "enter your Wi-Fi" prompt. Only
+                 * show it if nothing arrived, meaning the board genuinely
+                 * has no working Wi-Fi yet. */
+                pendingWifiSetupPrompt = () -> {
+                    pendingWifiSetupPrompt = null;
+                    /* Defensive re-check: don't blindly show the Wi-Fi form
+                     * just because this timer fired. If Wi-Fi actually became
+                     * ready in the meantime through any other path, showing
+                     * the form now would be wrong and confusing regardless of
+                     * how that happened. */
+                    if (isWifiReady()) {
+                        return;
+                    }
+                    for (Listener listener : listeners) {
+                        listener.onWifiSetupReady();
+                    }
+                    emitStatus("Enter Wi-Fi settings", COLOR_SUCCESS);
+                };
+                mainHandler.postDelayed(pendingWifiSetupPrompt, 1500);
             } else {
                 emitStatus("Response subscription failed: " + status, COLOR_ERROR);
             }
@@ -201,6 +235,18 @@ public final class BoardLink {
             emitLog("Board: " + response);
             if (response.startsWith("WiFi connected ip=")) {
                 boardIp = response.substring("WiFi connected ip=".length()).trim();
+                if (pendingWifiSetupPrompt != null) {
+                    mainHandler.removeCallbacks(pendingWifiSetupPrompt);
+                    pendingWifiSetupPrompt = null;
+                }
+                networkExecutor.execute(() -> {
+                    try {
+                        Thread.sleep(1500);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+                    ensurePassiveModeIfNeeded(boardIp);
+                });
                 post(() -> {
                     for (Listener listener : listeners) {
                         listener.onWifiConnected(boardIp);
@@ -250,6 +296,139 @@ public final class BoardLink {
 
     public boolean isWifiReady() {
         return boardIp != null && !boardIp.isEmpty();
+    }
+
+    public void forcePassiveCanMode() {
+        if (!isWifiReady()) {
+            return;
+        }
+        networkExecutor.execute(() -> ensurePassiveModeIfNeeded(boardIp));
+    }
+
+    public void fetchCanMode(Consumer<String> callback) {
+        if (callback == null) {
+            return;
+        }
+        if (!isWifiReady()) {
+            callback.accept("PASSIVE");
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/can").openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                if (code >= 400) {
+                    callback.accept("UNKNOWN");
+                    return;
+                }
+                JSONObject canState = new JSONObject(response);
+                callback.accept(canState.optBoolean("passive", true) ? "PASSIVE" : "ACTIVE");
+            } catch (Exception exception) {
+                callback.accept("UNKNOWN");
+            }
+        });
+    }
+
+    /**
+     * Explicitly requests a CAN mode change ("active" or "passive") from the UI.
+     * Unlike {@link #ensurePassiveModeIfNeeded}, this is a direct user action and
+     * is allowed to switch the board to active mode -- the board still defaults to
+     * passive on every boot and Wi-Fi reconnect, so this never changes that safe
+     * default, only the current live session.
+     */
+    public void setCanMode(String mode, Consumer<Boolean> callback) {
+        if (!isWifiReady()) {
+            if (callback != null) {
+                post(() -> callback.accept(false));
+            }
+            return;
+        }
+        networkExecutor.execute(() -> {
+            boolean success = false;
+            try {
+                byte[] body = mode.getBytes(StandardCharsets.UTF_8);
+                HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/can/mode").openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setDoOutput(true);
+                connection.setUseCaches(false);
+                connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+                connection.setFixedLengthStreamingMode(body.length);
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    output.write(body);
+                }
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                if (code >= 400) {
+                    emitLog("CAN mode set failed: HTTP " + code + " -> " + response);
+                } else {
+                    emitLog("CAN mode set to " + mode + ": " + response);
+                    success = true;
+                }
+            } catch (Exception exception) {
+                emitLog("CAN mode set failed: " + exception.getMessage());
+            }
+            boolean finalSuccess = success;
+            if (callback != null) {
+                post(() -> callback.accept(finalSuccess));
+            }
+        });
+    }
+
+    private void ensurePassiveModeIfNeeded(String boardIp) {
+        try {
+            HttpURLConnection statusConnection = (HttpURLConnection) new URL("http://" + boardIp + "/api/can").openConnection();
+            statusConnection.setRequestMethod("GET");
+            statusConnection.setConnectTimeout(3000);
+            statusConnection.setReadTimeout(3000);
+            int code = statusConnection.getResponseCode();
+            String response = readResponse(code >= 400 ? statusConnection.getErrorStream() : statusConnection.getInputStream());
+            statusConnection.disconnect();
+            if (code >= 400) {
+                emitLog("Board status check failed during passive sync: HTTP " + code + " -> " + response);
+                return;
+            }
+            JSONObject canState = new JSONObject(response);
+            if (canState.optBoolean("passive", true)) {
+                emitLog("Board already passive on Wi-Fi connect; no mode change required.");
+                return;
+            }
+        } catch (Exception ignored) {
+            emitLog("Board status check timed out during passive sync; skipping active-to-passive correction.");
+            return;
+        }
+
+        try {
+            byte[] body = "passive".getBytes(StandardCharsets.UTF_8);
+            HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/can/mode").openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            connection.setDoOutput(true);
+            connection.setUseCaches(false);
+            connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+            connection.setFixedLengthStreamingMode(body.length);
+            try (java.io.OutputStream output = connection.getOutputStream()) {
+                output.write(body);
+            }
+            int code = connection.getResponseCode();
+            String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+            connection.disconnect();
+            if (code >= 400) {
+                emitLog("CAN mode set failed: HTTP " + code + " -> " + response);
+                return;
+            }
+            emitLog("CAN mode corrected to passive: " + response);
+        } catch (Exception exception) {
+            emitLog("Passive mode correction failed: " + exception.getMessage());
+        }
     }
 
     public String getBoardIp() {
@@ -575,6 +754,10 @@ public final class BoardLink {
         boardIp = null;
         responseCharacteristic = null;
         wifiConfigCharacteristic = null;
+        if (pendingWifiSetupPrompt != null) {
+            mainHandler.removeCallbacks(pendingWifiSetupPrompt);
+            pendingWifiSetupPrompt = null;
+        }
         post(() -> {
             for (Listener listener : listeners) {
                 listener.onBoardConnectionChanged(false);
@@ -587,15 +770,13 @@ public final class BoardLink {
     public void restartConnection() {
         stopScan();
         closeGatt();
-        boardIp = null;
-        responseCharacteristic = null;
-        wifiConfigCharacteristic = null;
-        post(() -> {
-            for (Listener listener : listeners) {
-                listener.onBoardConnectionChanged(false);
-            }
-        });
-        emitStatus("Restarting connection", COLOR_DEFAULT);
+        /* Reuse clearConnection() rather than duplicating its cleanup here --
+         * this used to be a hand-copied subset that predated (and therefore
+         * never cancelled) pendingWifiSetupPrompt, so restarting mid-connection
+         * could leave a stale "show Wi-Fi setup" callback armed on the Handler
+         * queue, which then fired against the NEW connection and showed the
+         * form even when the new one was already fully connected. */
+        clearConnection("Restarting connection");
         startScan();
     }
 

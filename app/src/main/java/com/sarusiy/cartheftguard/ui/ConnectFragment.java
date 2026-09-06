@@ -63,6 +63,24 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
 
     private TextView statusText;
     private TextView deviceText;
+    private TextView canModeText;
+    /* True only if onWifiSetupReady() actually showed the credentials form
+     * this connection. Guards onWifiConnected()'s credential-save call so it
+     * doesn't overwrite securely-stored Wi-Fi credentials with empty text
+     * boxes when the board turned out to already be connected and the form
+     * was skipped entirely (see BoardLink's pendingWifiSetupPrompt). */
+    private boolean wifiSetupFormShown;
+    /* Safety net for when the one-shot "board just became Wi-Fi ready" BLE
+     * push arrives late or gets missed (board's own Wi-Fi join can genuinely
+     * take longer than BoardLink's short grace-period timer, or the BLE
+     * notify can simply be delayed/lost). Without this, the screen only ever
+     * self-corrected when the user happened to navigate away and back
+     * (which re-runs syncUiToCurrentState() fresh). Polling here means it
+     * self-corrects on its own, in place, within about a second of the real
+     * state actually changing. Uses the fragment's own View.postDelayed
+     * instead of a separate Handler field to avoid any doubt about Handler
+     * construction timing. */
+    private Runnable wifiStatusPoller;
     private TextView logText;
     private LinearLayout scanSection;
     private LinearLayout scanResults;
@@ -91,14 +109,111 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
         super.onStart();
         boardLink.addListener(this);
         ensureBleReady();
-        deviceText.setText(boardLink.isBoardConnected() ? "Board: " + BoardLink.TARGET_NAME : "Board: not connected");
-        if (!boardLink.isBoardConnected()) {
+        syncUiToCurrentState();
+        if (!boardLink.isWifiReady()) {
+            startWifiStatusPolling();
+        }
+    }
+
+    private void startWifiStatusPolling() {
+        stopWifiStatusPolling();
+        wifiStatusPoller = new Runnable() {
+            @Override
+            public void run() {
+                if (boardLink.isWifiReady()) {
+                    syncUiToCurrentState();
+                    wifiStatusPoller = null;
+                    return;
+                }
+                /* No attempt cap: this is cheap (one boolean check per
+                 * second) and onStop() already cancels it the moment the
+                 * user leaves this screen, so there's no real cost to
+                 * letting it run for as long as the user stays here waiting
+                 * to connect -- a real first-time scan -> select device ->
+                 * BLE connect -> provision Wi-Fi flow can easily take longer
+                 * than any fixed timeout we'd pick. */
+                View pollView = getView();
+                if (pollView != null) {
+                    pollView.postDelayed(this, 1000);
+                }
+            }
+        };
+        View view = getView();
+        if (view != null) {
+            view.postDelayed(wifiStatusPoller, 1000);
+        }
+    }
+
+    private void stopWifiStatusPolling() {
+        if (wifiStatusPoller != null) {
+            View view = getView();
+            if (view != null) {
+                view.removeCallbacks(wifiStatusPoller);
+            }
+            wifiStatusPoller = null;
+        }
+    }
+
+    /* Fragment views/instances get recreated on every tab switch (or process
+     * recreation), but BoardLink's actual BLE/Wi-Fi connection is a singleton
+     * that keeps running underneath. A fresh ConnectFragment instance only
+     * ever sees FUTURE events from BoardLink's listener callbacks -- it never
+     * gets a replay of "already connected" state from before it existed. That
+     * left this screen showing stale defaults ("Ready to scan", "CAN mode:
+     * unknown", the Wi-Fi setup form) even while the board was already fully
+     * connected and other screens (Monitor) were showing live data fine.
+     * Query BoardLink's actual current state directly here instead of
+     * relying purely on event replay. */
+    private void syncUiToCurrentState() {
+        boolean bleConnected = boardLink.isBoardConnected();
+        boolean wifiReady = boardLink.isWifiReady();
+        deviceText.setText(bleConnected || wifiReady ? "Board: " + BoardLink.TARGET_NAME : "Board: not connected");
+
+        if (wifiReady) {
+            /* Wi-Fi/HTTP reachability -- exactly what MonitorFragment relies
+             * on via fetchObdData()/fetchGpsData() (which only gate on
+             * isWifiReady(), never on isBoardConnected()) -- is the real
+             * signal for "is the board giving me data right now", and it is
+             * independent of the separate interactive BLE session. Android
+             * commonly drops idle BLE GATT connections on its own (screen
+             * lock, backgrounding, radio congestion) while Wi-Fi/HTTP keeps
+             * working fine with the already-known IP, no BLE required. This
+             * used to be nested inside the BLE-connected check below and
+             * returned early before ever getting here, which is exactly why
+             * this screen kept showing "Ready to scan" / stale CAN mode even
+             * while Monitor had live data. */
+            scanSection.setVisibility(View.GONE);
+            wifiSetupSection.setVisibility(View.GONE);
+            wifiSetupFormShown = false;
+            String bleNote = bleConnected ? "" : " (BLE control channel idle)";
+            setStatus("Connected, Wi-Fi ready: " + boardLink.getBoardIp() + bleNote, BoardLink.COLOR_SUCCESS);
+            boardLink.fetchCanMode(mode -> requireActivity().runOnUiThread(() -> {
+                if (canModeText != null) {
+                    canModeText.setText("CAN mode: " + mode);
+                }
+            }));
+            return;
+        }
+
+        if (!bleConnected) {
+            scanSection.setVisibility(View.VISIBLE);
+            wifiSetupSection.setVisibility(View.GONE);
+            wifiSetupFormShown = false;
+            provisionButton.setEnabled(false);
+            if (canModeText != null) {
+                canModeText.setText("CAN mode: unknown");
+            }
             prefillSavedWifi();
         }
+        /* else: connected over BLE but Wi-Fi status not confirmed yet --
+         * leave the scan/setup sections as-is and let BoardLink's own grace-
+         * period timer (pendingWifiSetupPrompt) decide whether to show the
+         * Wi-Fi form once it resolves. */
     }
 
     @Override
     public void onStop() {
+        stopWifiStatusPolling();
         boardLink.removeListener(this);
         super.onStop();
     }
@@ -120,10 +235,15 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
         root.setBackgroundColor(0xfff5f2ea);
 
         root.addView(Views.label(context, "Connect", 24, true), Views.matchWrap());
+        TextView versionText = Views.label(context, "Version: " + appVersionLabel(context), 12, false);
+        versionText.setTextColor(0xff8a94a6);
+        root.addView(versionText, Views.matchWrapTop(context, 4));
         statusText = Views.label(context, "Status: idle", 17, true);
         root.addView(statusText, Views.matchWrapTop(context, 16));
         deviceText = Views.label(context, "Board: not connected", 14, false);
         root.addView(deviceText, Views.matchWrapTop(context, 6));
+        canModeText = Views.label(context, "CAN mode: unknown", 14, false);
+        root.addView(canModeText, Views.matchWrapTop(context, 6));
 
         Button restartButton = Views.secondaryButton(context, "Restart Connection");
         restartButton.setOnClickListener(view -> boardLink.restartConnection());
@@ -237,6 +357,19 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
         boardLink.provisionWifi(ssidInput.getText().toString().trim(), passwordInput.getText().toString());
     }
 
+    /* Surfaces the installed app version directly on this screen so it can be
+     * confirmed after a reinstall without needing a separate About screen. */
+    private String appVersionLabel(Context context) {
+        try {
+            android.content.pm.PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
+            long versionCode = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P
+                    ? info.getLongVersionCode() : info.versionCode;
+            return info.versionName + " (" + versionCode + ")";
+        } catch (android.content.pm.PackageManager.NameNotFoundException exception) {
+            return "unknown";
+        }
+    }
+
     private void openAppSettings() {
         Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
         intent.setData(Uri.fromParts("package", requireContext().getPackageName(), null));
@@ -297,22 +430,56 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
             provisionButton.setEnabled(false);
             scanSection.setVisibility(View.VISIBLE);
             wifiSetupSection.setVisibility(View.GONE);
+            wifiSetupFormShown = false;
+            if (canModeText != null) {
+                canModeText.setText("CAN mode: unknown");
+            }
+        } else if (!boardLink.isWifiReady()) {
+            /* A fresh BLE connection is the real start of a connection
+             * attempt -- restart polling from here (not just from
+             * onStart()/fragment creation) so a full scan -> select device ->
+             * connect -> provision Wi-Fi cycle (which can easily take longer
+             * than the fragment has already been alive) gets its own full
+             * polling window instead of inheriting an already-expired one. */
+            startWifiStatusPolling();
         }
     }
 
     @Override
     public void onWifiSetupReady() {
+        /* Defensive re-check, independent of BoardLink's own guard: never
+         * show the Wi-Fi form if the board is actually already reachable.
+         * Belt-and-suspenders against any race between this event firing and
+         * Wi-Fi becoming ready through a different path in the meantime. */
+        if (boardLink.isWifiReady()) {
+            return;
+        }
         provisionButton.setEnabled(true);
         scanSection.setVisibility(View.GONE);
         wifiSetupSection.setVisibility(View.VISIBLE);
+        wifiSetupFormShown = true;
         prefillSavedWifi();
     }
 
     @Override
     public void onWifiConnected(String boardIp) {
+        stopWifiStatusPolling();
+        scanSection.setVisibility(View.GONE);
         wifiSetupSection.setVisibility(View.GONE);
-        secureWifiStore.save(ssidInput.getText().toString().trim(), passwordInput.getText().toString());
-        appendLog("Saved Wi-Fi credentials securely for next time");
+        if (wifiSetupFormShown) {
+            secureWifiStore.save(ssidInput.getText().toString().trim(), passwordInput.getText().toString());
+            appendLog("Saved Wi-Fi credentials securely for next time");
+            wifiSetupFormShown = false;
+        }
+        if (boardLink != null) {
+            boardLink.fetchCanMode(mode -> {
+                requireActivity().runOnUiThread(() -> {
+                    if (canModeText != null) {
+                        canModeText.setText("CAN mode: " + mode);
+                    }
+                });
+            });
+        }
     }
 
     @Override
