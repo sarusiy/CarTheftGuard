@@ -81,6 +81,7 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
      * instead of a separate Handler field to avoid any doubt about Handler
      * construction timing. */
     private Runnable wifiStatusPoller;
+    private int wifiStatusPollTicks;
     private TextView logText;
     private LinearLayout scanSection;
     private LinearLayout scanResults;
@@ -117,13 +118,20 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
 
     private void startWifiStatusPolling() {
         stopWifiStatusPolling();
+        wifiStatusPollTicks = 0;
+        appendLog("Wi-Fi status poll: started");
         wifiStatusPoller = new Runnable() {
             @Override
             public void run() {
+                wifiStatusPollTicks++;
                 if (boardLink.isWifiReady()) {
+                    appendLog("Wi-Fi status poll: ready after " + wifiStatusPollTicks + "s, updating UI");
                     syncUiToCurrentState();
                     wifiStatusPoller = null;
                     return;
+                }
+                if (wifiStatusPollTicks % 5 == 0) {
+                    appendLog("Wi-Fi status poll: still waiting (" + wifiStatusPollTicks + "s)");
                 }
                 /* No attempt cap: this is cheap (one boolean check per
                  * second) and onStop() already cancels it the moment the
@@ -146,6 +154,7 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
 
     private void stopWifiStatusPolling() {
         if (wifiStatusPoller != null) {
+            appendLog("Wi-Fi status poll: stopped after " + wifiStatusPollTicks + "s");
             View view = getView();
             if (view != null) {
                 view.removeCallbacks(wifiStatusPoller);
@@ -435,6 +444,7 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
                 canModeText.setText("CAN mode: unknown");
             }
         } else if (!boardLink.isWifiReady()) {
+            appendLog("BLE connected, Wi-Fi not yet ready; starting status poll");
             /* A fresh BLE connection is the real start of a connection
              * attempt -- restart polling from here (not just from
              * onStart()/fragment creation) so a full scan -> select device ->
@@ -464,6 +474,12 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
     @Override
     public void onWifiConnected(String boardIp) {
         stopWifiStatusPolling();
+        appendLog("onWifiConnected fired: ip=" + boardIp);
+        /* Set the status text directly here instead of relying solely on the
+         * separate onStatus()/emitStatus() callback from BoardLink to arrive
+         * correctly -- keeps this self-sufficient regardless of any BLE
+         * event-ordering edge case between the two decoupled callbacks. */
+        setStatus("Connected, Wi-Fi ready: " + boardIp, BoardLink.COLOR_SUCCESS);
         scanSection.setVisibility(View.GONE);
         wifiSetupSection.setVisibility(View.GONE);
         if (wifiSetupFormShown) {
