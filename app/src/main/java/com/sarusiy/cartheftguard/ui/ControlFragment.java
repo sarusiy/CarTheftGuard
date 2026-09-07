@@ -27,6 +27,9 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
     private TextView linkText;
     private EditText frequencyInput;
     private Button frequencyButton;
+    private TextView canModeText;
+    private Button activeModeButton;
+    private Button passiveModeButton;
 
     @Override
     public void onAttach(@NonNull Context context) {
@@ -45,6 +48,7 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
         super.onStart();
         boardLink.addListener(this);
         updateLinkState();
+        refreshCanMode();
     }
 
     @Override
@@ -86,6 +90,24 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
         frequencyButton.setOnClickListener(view -> sendFrequency());
         root.addView(frequencyButton, Views.matchHeightTop(context, 52, 16));
 
+        root.addView(Views.label(context, "CAN Bus Mode", 16, true), Views.matchWrapTop(context, 28));
+        canModeText = Views.label(context, "CAN mode: unknown", 14, false);
+        root.addView(canModeText, Views.matchWrapTop(context, 4));
+        root.addView(Views.label(context, "Active sends requests on the bus (needed for Monitor's Supported PIDs, "
+                        + "and for the Faults tab); Passive only listens, never transmits.", 12, false),
+                Views.matchWrapTop(context, 4));
+        LinearLayout modeButtons = new LinearLayout(context);
+        modeButtons.setOrientation(LinearLayout.HORIZONTAL);
+        passiveModeButton = Views.secondaryButton(context, "Set Passive");
+        passiveModeButton.setOnClickListener(view -> setCanMode("passive"));
+        modeButtons.addView(passiveModeButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        activeModeButton = Views.primaryButton(context, "Set Active");
+        activeModeButton.setOnClickListener(view -> setCanMode("active"));
+        LinearLayout.LayoutParams activeParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        activeParams.leftMargin = Views.dp(context, 8);
+        modeButtons.addView(activeModeButton, activeParams);
+        root.addView(modeButtons, Views.matchWrapTop(context, 8));
+
         root.addView(Views.label(context, "More controls (headlights, horn, lock, etc.) land here as the firmware grows.", 12, false),
                 Views.matchWrapTop(context, 24));
 
@@ -103,6 +125,18 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
             return;
         }
         boardLink.sendFrequency(value);
+    }
+
+    private void setCanMode(String mode) {
+        boardLink.setCanMode(mode, success -> refreshCanMode());
+    }
+
+    private void refreshCanMode() {
+        boardLink.fetchCanMode(mode -> requireActivity().runOnUiThread(() -> {
+            if (canModeText != null) {
+                canModeText.setText("CAN mode: " + mode);
+            }
+        }));
     }
 
     private void updateLinkState() {
