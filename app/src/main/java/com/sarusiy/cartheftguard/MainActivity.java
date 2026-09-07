@@ -9,20 +9,38 @@ import android.widget.LinearLayout;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.fragment.app.Fragment;
 
-import com.google.android.material.bottomnavigation.BottomNavigationView;
+import com.google.android.material.tabs.TabLayout;
 import com.sarusiy.cartheftguard.ui.ConnectFragment;
 import com.sarusiy.cartheftguard.ui.ControlFragment;
+import com.sarusiy.cartheftguard.ui.FaultsFragment;
 import com.sarusiy.cartheftguard.ui.MonitorFragment;
 import com.sarusiy.cartheftguard.ui.RecordFragment;
 import com.sarusiy.cartheftguard.ui.TrackFragment;
 
 /**
- * Thin host Activity: owns the bottom navigation bar and swaps between the
- * four top-level screens (Connect / Monitor / Control / About). All BLE/Wi-Fi
- * state lives in {@link BoardLink}, shared across fragments, not here.
+ * Thin host Activity: owns the tab bar and swaps between the top-level
+ * screens. All BLE/Wi-Fi state lives in {@link BoardLink}, shared across
+ * fragments, not here.
+ *
+ * Uses a scrollable TabLayout rather than BottomNavigationView: the latter
+ * hard-caps at 5 destinations and throws IllegalArgumentException past that
+ * (see NavigationBarMenu#addInternal) -- this app already has 6 tabs and is
+ * expected to grow more over time.
  */
 public class MainActivity extends AppCompatActivity {
     private static final int FRAGMENT_CONTAINER_ID = View.generateViewId();
+
+    private static final String[] TAB_TITLES = {
+            "Connect", "Monitor", "Track", "Control", "Record", "Faults"
+    };
+    private static final int[] TAB_ICONS = {
+            android.R.drawable.stat_sys_data_bluetooth,
+            android.R.drawable.ic_menu_view,
+            android.R.drawable.ic_dialog_map,
+            android.R.drawable.ic_menu_preferences,
+            android.R.drawable.ic_menu_save,
+            android.R.drawable.ic_dialog_alert,
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -31,46 +49,57 @@ public class MainActivity extends AppCompatActivity {
         FrameLayout fragmentContainer = new FrameLayout(this);
         fragmentContainer.setId(FRAGMENT_CONTAINER_ID);
 
-        BottomNavigationView bottomNav = new BottomNavigationView(this);
-        bottomNav.inflateMenu(R.menu.bottom_nav_menu);
-        bottomNav.setOnItemSelectedListener(item -> {
-            Fragment fragment = createFragment(item.getItemId());
-            if (fragment == null) {
-                return false;
+        TabLayout tabLayout = new TabLayout(this);
+        tabLayout.setTabMode(TabLayout.MODE_SCROLLABLE);
+        tabLayout.setTabGravity(TabLayout.GRAVITY_START);
+        for (int i = 0; i < TAB_TITLES.length; i++) {
+            tabLayout.addTab(tabLayout.newTab().setText(TAB_TITLES[i]).setIcon(TAB_ICONS[i]));
+        }
+        tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
+            @Override
+            public void onTabSelected(TabLayout.Tab tab) {
+                showFragment(tab.getPosition());
             }
-            getSupportFragmentManager().beginTransaction()
-                    .replace(FRAGMENT_CONTAINER_ID, fragment)
-                    .commit();
-            return true;
+
+            @Override
+            public void onTabUnselected(TabLayout.Tab tab) {
+            }
+
+            @Override
+            public void onTabReselected(TabLayout.Tab tab) {
+            }
         });
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.addView(fragmentContainer, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
-        root.addView(bottomNav, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(tabLayout, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(root);
 
         if (savedInstanceState == null) {
-            bottomNav.setSelectedItemId(R.id.nav_connect);
+            showFragment(0);
         }
     }
 
-    private Fragment createFragment(int itemId) {
-        if (itemId == R.id.nav_connect) {
-            return new ConnectFragment();
+    private void showFragment(int position) {
+        Fragment fragment = createFragment(position);
+        if (fragment == null) {
+            return;
         }
-        if (itemId == R.id.nav_monitor) {
-            return new MonitorFragment();
+        getSupportFragmentManager().beginTransaction()
+                .replace(FRAGMENT_CONTAINER_ID, fragment)
+                .commit();
+    }
+
+    private Fragment createFragment(int position) {
+        switch (position) {
+            case 0: return new ConnectFragment();
+            case 1: return new MonitorFragment();
+            case 2: return new TrackFragment();
+            case 3: return new ControlFragment();
+            case 4: return new RecordFragment();
+            case 5: return new FaultsFragment();
+            default: return null;
         }
-        if (itemId == R.id.nav_track) {
-            return new TrackFragment();
-        }
-        if (itemId == R.id.nav_control) {
-            return new ControlFragment();
-        }
-        if (itemId == R.id.nav_record) {
-            return new RecordFragment();
-        }
-        return null;
     }
 }

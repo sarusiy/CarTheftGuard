@@ -73,6 +73,7 @@ public final class BoardLink {
         default void onWifiNetworksUpdated(List<android.net.wifi.ScanResult> results) {}
         default void onObdData(String json) {}
         default void onGpsData(String json) {}
+        default void onDtcData(String json) {}
     }
 
     private static volatile BoardLink instance;
@@ -104,6 +105,7 @@ public final class BoardLink {
     private volatile String boardIp;
     private final AtomicBoolean obdFetchInFlight = new AtomicBoolean(false);
     private final AtomicBoolean gpsFetchInFlight = new AtomicBoolean(false);
+    private final AtomicBoolean dtcFetchInFlight = new AtomicBoolean(false);
     /* Set right after BLE subscribe completes, cleared once we know the actual
      * Wi-Fi state (either an already-connected IP arrives, or the grace period
      * below elapses with nothing). Lets onWifiConnected cancel the pending
@@ -710,6 +712,96 @@ public final class BoardLink {
                 emitLog("GPS monitor request failed: " + exception.getMessage());
             } finally {
                 gpsFetchInFlight.set(false);
+            }
+        });
+    }
+
+    public void fetchDtcs() {
+        if (!isWifiReady()) {
+            return;
+        }
+        if (!dtcFetchInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/dtc").openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                if (code >= 400) {
+                    emitLog("Fault list request failed: HTTP " + code);
+                    return;
+                }
+                post(() -> {
+                    for (Listener listener : listeners) {
+                        listener.onDtcData(response);
+                    }
+                });
+            } catch (Exception exception) {
+                emitLog("Fault list request failed: " + exception.getMessage());
+            } finally {
+                dtcFetchInFlight.set(false);
+            }
+        });
+    }
+
+    public void simulateFault(int faultIndex) {
+        if (!isWifiReady()) {
+            emitStatus("Connect the board to Wi-Fi first", COLOR_ERROR);
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                byte[] body = String.valueOf(faultIndex).getBytes(StandardCharsets.UTF_8);
+                HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/dtc/simulate").openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setDoOutput(true);
+                connection.setUseCaches(false);
+                connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+                connection.setFixedLengthStreamingMode(body.length);
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    output.write(body);
+                }
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                emitLog("Fault simulate: " + response);
+                fetchDtcs();
+            } catch (Exception exception) {
+                emitLog("Fault simulate request failed: " + exception.getMessage());
+                emitStatus("Fault simulate request failed", COLOR_ERROR);
+            }
+        });
+    }
+
+    public void clearDtcs() {
+        if (!isWifiReady()) {
+            emitStatus("Connect the board to Wi-Fi first", COLOR_ERROR);
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/dtc/clear").openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setFixedLengthStreamingMode(0);
+                connection.setDoOutput(true);
+                connection.getOutputStream().close();
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                emitLog("Fault clear: " + response);
+                fetchDtcs();
+            } catch (Exception exception) {
+                emitLog("Fault clear request failed: " + exception.getMessage());
+                emitStatus("Fault clear request failed", COLOR_ERROR);
             }
         });
     }
