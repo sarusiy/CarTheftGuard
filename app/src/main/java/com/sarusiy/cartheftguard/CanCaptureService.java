@@ -36,6 +36,10 @@ public final class CanCaptureService extends Service {
     public static final String ACTION_STATUS = "com.sarusiy.cartheftguard.action.CAN_CAPTURE_STATUS";
     public static final String EXTRA_BOARD_IP = "board_ip";
     public static final String EXTRA_PASSIVE = "passive";
+    /** Optional filename prefix (e.g. "learn-lock") instead of the generic
+     * "can-" prefix, so guided-learning steps produce clearly-labeled files
+     * (see LearnFragment) instead of just a timestamp. */
+    public static final String EXTRA_LABEL = "label";
     public static final String EXTRA_RUNNING = "running";
     public static final String EXTRA_FRAMES = "frames";
     public static final String EXTRA_DROPPED = "dropped";
@@ -104,15 +108,16 @@ public final class CanCaptureService extends Service {
         }
 
         boolean passive = intent.getBooleanExtra(EXTRA_PASSIVE, true);
+        String label = intent.getStringExtra(EXTRA_LABEL);
         recording = true;
         frameCount = 0;
         droppedCount = 0;
         startForeground(NOTIFICATION_ID, buildNotification("Starting CAN recording"));
-        executor.execute(() -> captureLoop(boardIp, passive));
+        executor.execute(() -> captureLoop(boardIp, passive, label));
         return START_NOT_STICKY;
     }
 
-    private void captureLoop(String boardIp, boolean passive) {
+    private void captureLoop(String boardIp, boolean passive, String label) {
         Writer writer = null;
         try {
             setCanMode(boardIp, passive);
@@ -121,7 +126,8 @@ public final class CanCaptureService extends Service {
                 throw new IllegalStateException("Cannot create capture directory");
             }
             String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
-            File file = new File(directory, "can-" + stamp + ".csv");
+            String prefix = (label != null && !label.trim().isEmpty()) ? label.trim() : "can";
+            File file = new File(directory, prefix + "-" + stamp + ".csv");
             filePath = file.getAbsolutePath();
             writer = new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8);
             writer.write("phone_time_ms,board_time_us,sequence,bus,can_id,extended,rtr,dlc,data_hex,gps_fix,gps_lat,gps_lon,gps_speed_kmh,gps_heading_deg,gps_satellites\n");

@@ -13,6 +13,7 @@ import com.google.android.material.tabs.TabLayout;
 import com.sarusiy.cartheftguard.ui.ConnectFragment;
 import com.sarusiy.cartheftguard.ui.ControlFragment;
 import com.sarusiy.cartheftguard.ui.FaultsFragment;
+import com.sarusiy.cartheftguard.ui.LearnFragment;
 import com.sarusiy.cartheftguard.ui.MonitorFragment;
 import com.sarusiy.cartheftguard.ui.RecordFragment;
 import com.sarusiy.cartheftguard.ui.TrackFragment;
@@ -31,7 +32,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int FRAGMENT_CONTAINER_ID = View.generateViewId();
 
     private static final String[] TAB_TITLES = {
-            "Connect", "Monitor", "Track", "Control", "Record", "Faults"
+            "Connect", "Monitor", "Track", "Control", "Record", "Faults", "Learn"
     };
     private static final int[] TAB_ICONS = {
             android.R.drawable.stat_sys_data_bluetooth,
@@ -40,6 +41,7 @@ public class MainActivity extends AppCompatActivity {
             android.R.drawable.ic_menu_preferences,
             android.R.drawable.ic_menu_save,
             android.R.drawable.ic_dialog_alert,
+            android.R.drawable.ic_menu_help,
     };
 
     @Override
@@ -99,6 +101,7 @@ public class MainActivity extends AppCompatActivity {
             case 3: return new ControlFragment();
             case 4: return new RecordFragment();
             case 5: return new FaultsFragment();
+            case 6: return new LearnFragment();
             default: return null;
         }
     }
