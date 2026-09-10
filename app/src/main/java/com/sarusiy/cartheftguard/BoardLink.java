@@ -806,6 +806,39 @@ public final class BoardLink {
         });
     }
 
+    /**
+     * Raw CAN frames since {@code after} (0 for "from the start of the ring
+     * buffer"), independent of whether CanCaptureService is also recording to
+     * a CSV file -- both are just separate consumers of the same
+     * GET /api/can endpoint, so watching live doesn't require recording.
+     */
+    public void fetchCanRaw(long after, Consumer<String> callback) {
+        if (callback == null) {
+            return;
+        }
+        if (!isWifiReady()) {
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) new URL(
+                        "http://" + boardIp + "/api/can?after=" + after).openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                if (code >= 400) {
+                    return;
+                }
+                post(() -> callback.accept(response));
+            } catch (Exception exception) {
+                emitLog("Raw CAN fetch failed: " + exception.getMessage());
+            }
+        });
+    }
+
     private String readResponse(InputStream stream) throws Exception {
         if (stream == null) {
             return "No response";

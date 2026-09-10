@@ -1,11 +1,14 @@
 package com.sarusiy.cartheftguard.ui;
 
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -23,10 +26,16 @@ import androidx.fragment.app.Fragment;
 import com.sarusiy.cartheftguard.BoardLink;
 import com.sarusiy.cartheftguard.CanCaptureService;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.File;
 import java.text.DateFormat;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.Deque;
 
 /** Starts and monitors raw CAN recording to an app-owned CSV file. */
 public final class RecordFragment extends Fragment implements BoardLink.Listener {
@@ -40,6 +49,31 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     private TextView fileText;
     private TextView capturesText;
     private boolean receiverRegistered;
+
+    /** Live raw-frame tail: independent of CanCaptureService/CSV recording --
+     * both just poll the same GET /api/can, so you can watch live without
+     * needing to be actively recording to a file, and vice versa. Kept
+     * intentionally simple (last LIVE_MAX_LINES frames, most recent last) so
+     * it stays readable while you're also doing something physical in the
+     * car, rather than a full unbounded log. */
+    private static final int LIVE_POLL_INTERVAL_MS = 300;
+    private static final int LIVE_MAX_LINES = 60;
+    private TextView liveText;
+    private CheckBox liveCheckBox;
+    private long liveAfterSeq;
+    private final Deque<String> liveLines = new ArrayDeque<>();
+    private final Handler liveHandler = new Handler(Looper.getMainLooper());
+    private final Runnable livePollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (isAdded() && liveCheckBox != null && liveCheckBox.isChecked()) {
+                boardLink.fetchCanRaw(liveAfterSeq, RecordFragment.this::onLiveFrames);
+            }
+            if (isAdded()) {
+                liveHandler.postDelayed(this, LIVE_POLL_INTERVAL_MS);
+            }
+        }
+    };
 
     private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
         @Override
@@ -125,12 +159,42 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
 
         root.addView(Views.label(context, "Saved recordings", 16, true),
                 Views.matchWrapTop(context, 24));
+        LinearLayout captureButtonsRow = new LinearLayout(context);
+        captureButtonsRow.setOrientation(LinearLayout.HORIZONTAL);
         Button refreshButton = Views.secondaryButton(context, "Refresh recordings");
         refreshButton.setOnClickListener(view -> refreshCaptureList());
-        root.addView(refreshButton, Views.matchHeightTop(context, 46, 8));
+        captureButtonsRow.addView(refreshButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button clearAllButton = Views.secondaryButton(context, "Clear all recordings");
+        clearAllButton.setOnClickListener(view -> confirmClearAllRecordings());
+        LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        clearParams.leftMargin = Views.dp(context, 8);
+        captureButtonsRow.addView(clearAllButton, clearParams);
+        root.addView(captureButtonsRow, Views.matchHeightTop(context, 46, 8));
         capturesText = Views.label(context, "", 12, false);
         capturesText.setTextIsSelectable(true);
         root.addView(capturesText, Views.matchWrapTop(context, 8));
+
+        root.addView(Views.label(context, "Live raw frames", 16, true), Views.matchWrapTop(context, 24));
+        liveCheckBox = new CheckBox(context);
+        liveCheckBox.setText("Show live (independent of recording -- for watching while you act on the car)");
+        liveCheckBox.setTextColor(0xff1f2933);
+        liveCheckBox.setChecked(true);
+        root.addView(liveCheckBox, Views.matchWrapTop(context, 4));
+        TextView liveNote = Views.label(context,
+                "Newest at the bottom. Last " + LIVE_MAX_LINES + " frames shown; full history is only in the CSV.",
+                11, false);
+        liveNote.setTextColor(0xff52616b);
+        root.addView(liveNote, Views.matchWrapTop(context, 2));
+        liveText = new TextView(context);
+        liveText.setTextSize(11);
+        liveText.setTypeface(android.graphics.Typeface.MONOSPACE);
+        liveText.setTextColor(0xff1f2933);
+        liveText.setBackgroundColor(0xffffffff);
+        liveText.setPadding(Views.dp(context, 8), Views.dp(context, 8), Views.dp(context, 8), Views.dp(context, 8));
+        liveText.setTextIsSelectable(true);
+        LinearLayout.LayoutParams liveParams = Views.matchWrapTop(context, 8);
+        liveText.setMinHeight(Views.dp(context, 220));
+        root.addView(liveText, liveParams);
 
         ScrollView scroll = new ScrollView(context);
         scroll.addView(root);
@@ -151,16 +215,49 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         }
         receiverRegistered = true;
         updateConnectionState();
+        liveHandler.post(livePollRunnable);
     }
 
     @Override
     public void onStop() {
+        liveHandler.removeCallbacks(livePollRunnable);
         if (receiverRegistered) {
             requireContext().unregisterReceiver(statusReceiver);
             receiverRegistered = false;
         }
         boardLink.removeListener(this);
         super.onStop();
+    }
+
+    private void onLiveFrames(String json) {
+        try {
+            JSONObject data = new JSONObject(json);
+            JSONArray frames = data.optJSONArray("frames");
+            if (frames == null || frames.length() == 0) {
+                return;
+            }
+            for (int i = 0; i < frames.length(); i++) {
+                JSONObject frame = frames.optJSONObject(i);
+                if (frame == null) {
+                    continue;
+                }
+                long seq = frame.optLong("seq", liveAfterSeq);
+                if (seq > liveAfterSeq) {
+                    liveAfterSeq = seq;
+                }
+                String line = String.format(java.util.Locale.US, "#%-6d id=0x%03X dlc=%d data=%s",
+                        seq, frame.optInt("id", 0), frame.optInt("dlc", 0), frame.optString("data", ""));
+                liveLines.addLast(line);
+                while (liveLines.size() > LIVE_MAX_LINES) {
+                    liveLines.removeFirst();
+                }
+            }
+            if (liveText != null) {
+                liveText.setText(String.join("\n", liveLines));
+            }
+        } catch (JSONException exception) {
+            // Transient/partial response -- next poll will retry; not worth surfacing to the user.
+        }
     }
 
     private void startRecording() {
@@ -206,6 +303,34 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                     .append('\n');
         }
         capturesText.setText(summary.toString().trim());
+    }
+
+    private void confirmClearAllRecordings() {
+        File directory = new File(requireContext().getExternalFilesDir(null), "can-captures");
+        File[] files = directory.listFiles((dir, name) -> name.endsWith(".csv"));
+        int count = files == null ? 0 : files.length;
+        if (count == 0) {
+            capturesText.setText("No recordings yet.");
+            return;
+        }
+        new AlertDialog.Builder(requireContext())
+                .setTitle("Delete all recordings?")
+                .setMessage("This will permanently delete all " + count + " recording(s) on this phone "
+                        + "(from both Record and Learn). This cannot be undone.")
+                .setPositiveButton("Delete", (dialog, which) -> clearAllRecordings(files))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void clearAllRecordings(File[] files) {
+        int deleted = 0;
+        for (File file : files) {
+            if (file.delete()) {
+                deleted++;
+            }
+        }
+        capturesText.setText(deleted + " recording(s) deleted.");
+        refreshCaptureList();
     }
 
     private void updateConnectionState() {
