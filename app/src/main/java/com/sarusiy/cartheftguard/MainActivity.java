@@ -7,6 +7,8 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.fragment.app.Fragment;
 
 import com.google.android.material.tabs.TabLayout;
@@ -77,6 +79,19 @@ public class MainActivity extends AppCompatActivity {
         root.addView(fragmentContainer, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         root.addView(tabLayout, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(root);
+
+        /* API 35 (this app's targetSdk) enforces edge-to-edge by default, so without
+         * this the tab bar sits flush against the bottom edge -- inside the system's
+         * gesture-navigation zone on devices like this one. Taps there get eaten by
+         * the "go home" gesture instead of reaching the tab (looks like the app
+         * randomly minimizes when tapping a tab near the bottom). Pad the tab bar by
+         * the system bar/gesture inset so it sits above that zone. */
+        ViewCompat.setOnApplyWindowInsetsListener(tabLayout, (view, insets) -> {
+            int bottom = insets.getInsets(WindowInsetsCompat.Type.systemBars()
+                    | WindowInsetsCompat.Type.systemGestures()).bottom;
+            view.setPadding(view.getPaddingLeft(), view.getPaddingTop(), view.getPaddingRight(), bottom);
+            return insets;
+        });
 
         if (savedInstanceState == null) {
             showFragment(0);
