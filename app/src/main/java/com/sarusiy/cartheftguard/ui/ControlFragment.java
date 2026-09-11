@@ -132,11 +132,16 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
     }
 
     private void refreshCanMode() {
-        boardLink.fetchCanMode(mode -> requireActivity().runOnUiThread(() -> {
-            if (canModeText != null) {
-                canModeText.setText("CAN mode: " + mode);
+        boardLink.fetchCanMode(mode -> {
+            if (!isAdded()) {
+                return;
             }
-        }));
+            requireActivity().runOnUiThread(() -> {
+                if (canModeText != null) {
+                    canModeText.setText("CAN mode: " + mode);
+                }
+            });
+        });
     }
 
     private void updateLinkState() {

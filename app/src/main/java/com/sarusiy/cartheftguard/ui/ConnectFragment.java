@@ -196,11 +196,16 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
             wifiSetupFormShown = false;
             String bleNote = bleConnected ? "" : " (BLE control channel idle)";
             setStatus("Connected, Wi-Fi ready: " + boardLink.getBoardIp() + bleNote, BoardLink.COLOR_SUCCESS);
-            boardLink.fetchCanMode(mode -> requireActivity().runOnUiThread(() -> {
-                if (canModeText != null) {
-                    canModeText.setText("CAN mode: " + mode);
+            boardLink.fetchCanMode(mode -> {
+                if (!isAdded()) {
+                    return;
                 }
-            }));
+                requireActivity().runOnUiThread(() -> {
+                    if (canModeText != null) {
+                        canModeText.setText("CAN mode: " + mode);
+                    }
+                });
+            });
             return;
         }
 
@@ -489,6 +494,9 @@ public class ConnectFragment extends Fragment implements BoardLink.Listener {
         }
         if (boardLink != null) {
             boardLink.fetchCanMode(mode -> {
+                if (!isAdded()) {
+                    return;
+                }
                 requireActivity().runOnUiThread(() -> {
                     if (canModeText != null) {
                         canModeText.setText("CAN mode: " + mode);
