@@ -1,9 +1,11 @@
 package com.sarusiy.cartheftguard.ui;
 
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -57,6 +59,24 @@ public final class LearnFragment extends Fragment {
         }
     }
 
+    private static final class Car {
+        final String id;
+        final String label;
+
+        Car(String id, String label) {
+            this.id = id;
+            this.label = label;
+        }
+    }
+
+    private static final Car[] CARS = {
+            new Car("fiat500_2014", "Fiat 500 (2014)"),
+            new Car("fabia_2026", "Skoda Fabia (2026)"),
+    };
+
+    private static final String PREFS_NAME = "learn_prefs";
+    private static final String PREF_SELECTED_CAR = "selected_car";
+
     private static final Step[] STEPS = {
             new Step("baseline", "1. Baseline",
                     "Engine off, don't touch anything. Lets us know what's on the bus with nothing happening.",
@@ -82,8 +102,10 @@ public final class LearnFragment extends Fragment {
     private int currentStepIndex;
     private boolean stepRunning;
     private boolean receiverRegistered;
+    private String selectedCarId;
     private final Map<String, String> stepFiles = new LinkedHashMap<>();
 
+    private LinearLayout carButtonsRow;
     private TextView titleText;
     private TextView instructionsText;
     private TextView statusText;
@@ -124,6 +146,11 @@ public final class LearnFragment extends Fragment {
     public void onAttach(@NonNull Context context) {
         super.onAttach(context);
         boardLink = BoardLink.getInstance(context);
+        selectedCarId = prefs(context).getString(PREF_SELECTED_CAR, null);
+    }
+
+    private SharedPreferences prefs(Context context) {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
     }
 
     @Nullable
@@ -142,6 +169,12 @@ public final class LearnFragment extends Fragment {
                         "Guided capture: one short, labeled recording per action, then a diff against the baseline "
                                 + "highlights candidate CAN IDs for you.", 12, false),
                 Views.matchWrapTop(context, 4));
+
+        root.addView(Views.label(context, "Car", 16, true), Views.matchWrapTop(context, 20));
+        carButtonsRow = new LinearLayout(context);
+        carButtonsRow.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(carButtonsRow, Views.matchWrapTop(context, 4));
+        refreshCarButtons();
 
         titleText = Views.label(context, "", 18, true);
         root.addView(titleText, Views.matchWrapTop(context, 24));
@@ -213,14 +246,65 @@ public final class LearnFragment extends Fragment {
         super.onStop();
     }
 
+    private void refreshCarButtons() {
+        if (carButtonsRow == null) {
+            return;
+        }
+        Context context = requireContext();
+        carButtonsRow.removeAllViews();
+        for (int i = 0; i < CARS.length; i++) {
+            Car car = CARS[i];
+            boolean selected = car.id.equals(selectedCarId);
+            Button button = selected ? Views.primaryButton(context, car.label) : Views.secondaryButton(context, car.label);
+            button.setOnClickListener(view -> onCarPicked(car));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            if (i > 0) {
+                params.leftMargin = Views.dp(context, 8);
+            }
+            carButtonsRow.addView(button, params);
+        }
+    }
+
+    private void onCarPicked(Car car) {
+        if (car.id.equals(selectedCarId)) {
+            return;
+        }
+        if (!stepFiles.isEmpty()) {
+            new AlertDialog.Builder(requireContext())
+                    .setTitle("Switch car?")
+                    .setMessage("Switching to " + car.label + " will clear the steps recorded so far in this "
+                            + "session (the files themselves are kept on disk, just no longer tracked here).")
+                    .setPositiveButton("Switch", (dialog, which) -> selectCar(car))
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        } else {
+            selectCar(car);
+        }
+    }
+
+    private void selectCar(Car car) {
+        selectedCarId = car.id;
+        prefs(requireContext()).edit().putString(PREF_SELECTED_CAR, car.id).apply();
+        stepFiles.clear();
+        currentStepIndex = 0;
+        resultsText.setText("Record the baseline plus at least one action, then tap Analyze.");
+        refreshCarButtons();
+        showStep(currentStepIndex);
+    }
+
     private void showStep(int index) {
         Step step = STEPS[index];
         titleText.setText(step.title);
         instructionsText.setText(step.instructions);
-        statusText.setText(stepFiles.containsKey(step.id)
-                ? "Already recorded: " + new File(stepFiles.get(step.id)).getName()
-                : "Not recorded yet.");
-        startButton.setEnabled(true);
+        if (selectedCarId == null) {
+            statusText.setText("Select a car above first.");
+            startButton.setEnabled(false);
+        } else {
+            statusText.setText(stepFiles.containsKey(step.id)
+                    ? "Already recorded: " + new File(stepFiles.get(step.id)).getName()
+                    : "Not recorded yet.");
+            startButton.setEnabled(true);
+        }
         startButton.setText("Start recording (" + step.durationSec + "s)");
         repeatButton.setEnabled(stepFiles.containsKey(step.id));
         nextButton.setEnabled(stepFiles.containsKey(step.id) && index < STEPS.length - 1);
@@ -241,6 +325,10 @@ public final class LearnFragment extends Fragment {
     }
 
     private void startCurrentStep() {
+        if (selectedCarId == null) {
+            statusText.setText("Select a car above first.");
+            return;
+        }
         if (!boardLink.isWifiReady()) {
             statusText.setText("Connect the board to Wi-Fi first (Connect tab).");
             return;
@@ -255,7 +343,8 @@ public final class LearnFragment extends Fragment {
                 .setAction(CanCaptureService.ACTION_START)
                 .putExtra(CanCaptureService.EXTRA_BOARD_IP, boardLink.getBoardIp())
                 .putExtra(CanCaptureService.EXTRA_PASSIVE, true)
-                .putExtra(CanCaptureService.EXTRA_LABEL, "learn-" + step.id);
+                .putExtra(CanCaptureService.EXTRA_LABEL, "learn-" + selectedCarId + "-" + step.id)
+                .putExtra(CanCaptureService.EXTRA_CAR, selectedCarId);
         ContextCompat.startForegroundService(requireContext(), intent);
         autoStopHandler.postDelayed(autoStopRunnable, step.durationSec * 1000L);
     }

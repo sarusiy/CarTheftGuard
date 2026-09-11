@@ -33,9 +33,11 @@ import org.json.JSONObject;
 import java.io.File;
 import java.text.DateFormat;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.Deque;
+import java.util.List;
 
 /** Starts and monitors raw CAN recording to an app-owned CSV file. */
 public final class RecordFragment extends Fragment implements BoardLink.Listener {
@@ -278,24 +280,48 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         requireContext().startService(intent);
     }
 
+    /** Recordings now live either flat under can-captures/ (plain Record tab)
+     * or nested under can-captures/&lt;car&gt;/ (Learn tab, per-car folders),
+     * so this walks one level of subdirectories instead of a flat listFiles(). */
+    private List<File> listAllCaptureFiles() {
+        File root = new File(requireContext().getExternalFilesDir(null), "can-captures");
+        List<File> result = new ArrayList<>();
+        File[] entries = root.listFiles();
+        if (entries == null) {
+            return result;
+        }
+        for (File entry : entries) {
+            if (entry.isDirectory()) {
+                File[] nested = entry.listFiles((dir, name) -> name.endsWith(".csv"));
+                if (nested != null) {
+                    result.addAll(Arrays.asList(nested));
+                }
+            } else if (entry.getName().endsWith(".csv")) {
+                result.add(entry);
+            }
+        }
+        return result;
+    }
+
     private void refreshCaptureList() {
         if (capturesText == null) {
             return;
         }
-        File directory = new File(requireContext().getExternalFilesDir(null), "can-captures");
-        File[] files = directory.listFiles((dir, name) -> name.endsWith(".csv"));
-        if (files == null || files.length == 0) {
+        List<File> files = listAllCaptureFiles();
+        if (files.isEmpty()) {
             capturesText.setText("No recordings yet.");
             return;
         }
 
-        Arrays.sort(files, (left, right) -> Long.compare(right.lastModified(), left.lastModified()));
+        files.sort((left, right) -> Long.compare(right.lastModified(), left.lastModified()));
         DateFormat dateFormat = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM);
         StringBuilder summary = new StringBuilder();
-        int count = Math.min(files.length, 10);
+        int count = Math.min(files.size(), 10);
         for (int index = 0; index < count; index++) {
-            File file = files[index];
-            summary.append(file.getName())
+            File file = files.get(index);
+            File parent = file.getParentFile();
+            boolean nested = parent != null && !parent.getName().equals("can-captures");
+            summary.append(nested ? parent.getName() + "/" + file.getName() : file.getName())
                     .append("  ")
                     .append(file.length() / 1024)
                     .append(" KB  ")
@@ -306,9 +332,8 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     }
 
     private void confirmClearAllRecordings() {
-        File directory = new File(requireContext().getExternalFilesDir(null), "can-captures");
-        File[] files = directory.listFiles((dir, name) -> name.endsWith(".csv"));
-        int count = files == null ? 0 : files.length;
+        List<File> files = listAllCaptureFiles();
+        int count = files.size();
         if (count == 0) {
             capturesText.setText("No recordings yet.");
             return;
@@ -322,7 +347,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                 .show();
     }
 
-    private void clearAllRecordings(File[] files) {
+    private void clearAllRecordings(List<File> files) {
         int deleted = 0;
         for (File file : files) {
             if (file.delete()) {
