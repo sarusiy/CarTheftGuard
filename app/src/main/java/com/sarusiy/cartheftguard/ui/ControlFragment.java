@@ -30,6 +30,9 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
     private TextView canModeText;
     private Button activeModeButton;
     private Button passiveModeButton;
+    private TextView partnerText;
+    private Button simMode11Button;
+    private Button simMode29Button;
 
     @Override
     public void onAttach(@NonNull Context context) {
@@ -49,6 +52,7 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
         boardLink.addListener(this);
         updateLinkState();
         refreshCanMode();
+        refreshCanPartner();
     }
 
     @Override
@@ -108,6 +112,31 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
         modeButtons.addView(activeModeButton, activeParams);
         root.addView(modeButtons, Views.matchWrapTop(context, 8));
 
+        root.addView(Views.label(context, "Bus Partner", 16, true), Views.matchWrapTop(context, 28));
+        partnerText = Views.label(context, "Partner: unknown", 14, false);
+        root.addView(partnerText, Views.matchWrapTop(context, 4));
+        root.addView(Views.label(context, "Who's actually answering on the bus, and which OBD-II addressing "
+                        + "scheme they use -- SIM_* is the bench simulator, CAR_* is a real vehicle. The two "
+                        + "buttons below only work against the simulator (a real car ignores them) and are "
+                        + "only enabled while a simulator is detected.", 12, false),
+                Views.matchWrapTop(context, 4));
+        LinearLayout simModeButtons = new LinearLayout(context);
+        simModeButtons.setOrientation(LinearLayout.HORIZONTAL);
+        simMode11Button = Views.secondaryButton(context, "Sim: 11-bit");
+        simMode11Button.setEnabled(false);
+        simMode11Button.setOnClickListener(view -> setSimulatorMode("11"));
+        simModeButtons.addView(simMode11Button, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        simMode29Button = Views.secondaryButton(context, "Sim: 29-bit");
+        simMode29Button.setEnabled(false);
+        simMode29Button.setOnClickListener(view -> setSimulatorMode("29"));
+        LinearLayout.LayoutParams simMode29Params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        simMode29Params.leftMargin = Views.dp(context, 8);
+        simModeButtons.addView(simMode29Button, simMode29Params);
+        root.addView(simModeButtons, Views.matchWrapTop(context, 8));
+        Button refreshPartnerButton = Views.secondaryButton(context, "Refresh partner status");
+        refreshPartnerButton.setOnClickListener(view -> refreshCanPartner());
+        root.addView(refreshPartnerButton, Views.matchHeightTop(context, 44, 8));
+
         root.addView(Views.label(context, "More controls (headlights, horn, lock, etc.) land here as the firmware grows.", 12, false),
                 Views.matchWrapTop(context, 24));
 
@@ -139,6 +168,30 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
             requireActivity().runOnUiThread(() -> {
                 if (canModeText != null) {
                     canModeText.setText("CAN mode: " + mode);
+                }
+            });
+        });
+    }
+
+    private void setSimulatorMode(String mode) {
+        boardLink.setSimulatorMode(mode, success -> refreshCanPartner());
+    }
+
+    private void refreshCanPartner() {
+        boardLink.fetchCanPartner(partner -> {
+            if (!isAdded()) {
+                return;
+            }
+            requireActivity().runOnUiThread(() -> {
+                if (partnerText != null) {
+                    partnerText.setText("Partner: " + partner);
+                }
+                boolean isSimulator = partner.startsWith("SIM_");
+                if (simMode11Button != null) {
+                    simMode11Button.setEnabled(isSimulator);
+                }
+                if (simMode29Button != null) {
+                    simMode29Button.setEnabled(isSimulator);
                 }
             });
         });

@@ -417,6 +417,90 @@ public final class BoardLink {
         });
     }
 
+    /**
+     * Who's actually on the other end of the CAN bus and which OBD-II
+     * addressing scheme they use: "SIM_11"/"SIM_29" (the bench Arduino
+     * simulator), "CAR_11"/"CAR_29" (a real vehicle), or "UNKNOWN" if
+     * neither has been determined yet. Re-checked by the board on every
+     * call (not cached), so this is safe to poll periodically.
+     */
+    public void fetchCanPartner(Consumer<String> callback) {
+        if (callback == null) {
+            return;
+        }
+        if (!isWifiReady()) {
+            callback.accept("UNKNOWN");
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/can/partner").openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                if (code >= 400) {
+                    callback.accept("UNKNOWN");
+                    return;
+                }
+                JSONObject partnerState = new JSONObject(response);
+                callback.accept(partnerState.optString("partner", "UNKNOWN"));
+            } catch (Exception exception) {
+                callback.accept("UNKNOWN");
+            }
+        });
+    }
+
+    /**
+     * Remote-switches which OBD-II addressing scheme the bench simulator
+     * answers on ("11" or "29") -- only meaningful when the simulator is on
+     * the bus (a real vehicle just ignores this private command). The
+     * Control tab only shows this while fetchCanPartner reports SIM_*.
+     */
+    public void setSimulatorMode(String mode, Consumer<Boolean> callback) {
+        if (!isWifiReady()) {
+            emitStatus("Connect the board to Wi-Fi first", COLOR_ERROR);
+            if (callback != null) {
+                post(() -> callback.accept(false));
+            }
+            return;
+        }
+        networkExecutor.execute(() -> {
+            boolean success = false;
+            try {
+                byte[] body = mode.getBytes(StandardCharsets.UTF_8);
+                HttpURLConnection connection = (HttpURLConnection) new URL("http://" + boardIp + "/api/can/sim_mode").openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setDoOutput(true);
+                connection.setUseCaches(false);
+                connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+                connection.setFixedLengthStreamingMode(body.length);
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    output.write(body);
+                }
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                if (code >= 400) {
+                    emitLog("Simulator mode switch failed: HTTP " + code + " -> " + response);
+                } else {
+                    emitLog("Simulator mode switch to " + mode + "-bit: " + response);
+                    success = true;
+                }
+            } catch (Exception exception) {
+                emitLog("Simulator mode switch failed: " + exception.getMessage());
+            }
+            boolean finalSuccess = success;
+            if (callback != null) {
+                post(() -> callback.accept(finalSuccess));
+            }
+        });
+    }
+
     private void ensurePassiveModeIfNeeded(String boardIp) {
         try {
             HttpURLConnection statusConnection = (HttpURLConnection) new URL("http://" + boardIp + "/api/can").openConnection();
