@@ -76,6 +76,7 @@ public final class LearnFragment extends Fragment {
 
     private static final String PREFS_NAME = "learn_prefs";
     private static final String PREF_SELECTED_CAR = "selected_car";
+    private static final int CUSTOM_DURATION_SEC = 8;
 
     private static final Step[] STEPS = {
             new Step("baseline", "1. Baseline",
@@ -87,13 +88,19 @@ public final class LearnFragment extends Fragment {
             new Step("unlock", "3. Unlock (key fob)",
                     "From outside the car, press the unlock button on the key fob 2-3 times.",
                     8),
-            new Step("door_open", "4. Open driver door",
+            new Step("horn", "4. Horn",
+                    "Honk the horn (key fob panic button, or from inside) 1-2 times.",
+                    6),
+            new Step("headlights", "5. Headlights",
+                    "Turn the headlights on (low or high beam) and leave them on.",
+                    6),
+            new Step("door_open", "6. Open driver door",
                     "Manually open the driver's door.",
                     6),
-            new Step("door_close", "5. Close driver door",
+            new Step("door_close", "7. Close driver door",
                     "Close the driver's door.",
                     6),
-            new Step("ignition_acc", "6. Ignition ACC (no start)",
+            new Step("ignition_acc", "8. Ignition ACC (no start)",
                     "Turn the key/press start to ACC/ignition-on ONLY -- do not start the engine.",
                     8),
     };
@@ -104,6 +111,12 @@ public final class LearnFragment extends Fragment {
     private boolean receiverRegistered;
     private String selectedCarId;
     private final Map<String, String> stepFiles = new LinkedHashMap<>();
+    /** Custom/"other" recordings this session: generated id -> user-typed label. */
+    private final Map<String, String> customLabels = new LinkedHashMap<>();
+    private boolean isCustomRecording;
+    private String pendingCustomId;
+    private String pendingCustomLabel;
+    private int customCounter;
 
     private LinearLayout carButtonsRow;
     private TextView titleText;
@@ -112,6 +125,9 @@ public final class LearnFragment extends Fragment {
     private Button startButton;
     private Button repeatButton;
     private Button nextButton;
+    private android.widget.EditText customLabelInput;
+    private Button customStartButton;
+    private TextView customListText;
     private Button analyzeButton;
     private TextView resultsText;
 
@@ -124,6 +140,22 @@ public final class LearnFragment extends Fragment {
             boolean running = intent.getBooleanExtra(CanCaptureService.EXTRA_RUNNING, false);
             String file = intent.getStringExtra(CanCaptureService.EXTRA_FILE);
             String error = intent.getStringExtra(CanCaptureService.EXTRA_ERROR);
+            if (isCustomRecording && !running) {
+                isCustomRecording = false;
+                autoStopHandler.removeCallbacks(autoStopRunnable);
+                if (error != null && !error.isEmpty()) {
+                    customListText.setText("Error: " + error);
+                } else if (file != null && !file.isEmpty()) {
+                    stepFiles.put(pendingCustomId, file);
+                    customLabels.put(pendingCustomId, pendingCustomLabel);
+                    customLabelInput.setText("");
+                    refreshCustomList();
+                    analyzeButton.setEnabled(stepFiles.containsKey("baseline") && stepFiles.size() > 1);
+                }
+                startButton.setEnabled(selectedCarId != null);
+                customStartButton.setEnabled(true);
+                return;
+            }
             if (stepRunning && !running) {
                 stepRunning = false;
                 autoStopHandler.removeCallbacks(autoStopRunnable);
@@ -138,6 +170,7 @@ public final class LearnFragment extends Fragment {
                 }
                 startButton.setEnabled(true);
                 startButton.setText("Start recording (" + STEPS[currentStepIndex].durationSec + "s)");
+                customStartButton.setEnabled(true);
             }
         }
     };
@@ -201,6 +234,21 @@ public final class LearnFragment extends Fragment {
         nextParams.leftMargin = Views.dp(context, 8);
         row.addView(nextButton, nextParams);
         root.addView(row, Views.matchWrapTop(context, 10));
+
+        root.addView(Views.label(context, "Other actions (optional)", 16, true), Views.matchWrapTop(context, 24));
+        root.addView(Views.label(context,
+                        "Record anything not listed above (e.g. trunk release, remote start, fold mirrors). "
+                                + "Give it a short label, record it, then either type another label and record "
+                                + "again, or just leave it there and tap Analyze when you're done.", 12, false),
+                Views.matchWrapTop(context, 4));
+        customLabelInput = Views.input(context, "e.g. trunk release", android.text.InputType.TYPE_CLASS_TEXT);
+        root.addView(customLabelInput, Views.matchWrapTop(context, 8));
+        customStartButton = Views.secondaryButton(context, "Record this action (" + CUSTOM_DURATION_SEC + "s)");
+        customStartButton.setOnClickListener(view -> startCustomAction());
+        root.addView(customStartButton, Views.matchHeightTop(context, 48, 8));
+        customListText = Views.label(context, "", 12, false);
+        customListText.setTextColor(0xff52616b);
+        root.addView(customListText, Views.matchWrapTop(context, 8));
 
         analyzeButton = Views.secondaryButton(context, "Analyze recorded steps");
         analyzeButton.setEnabled(false);
@@ -286,8 +334,15 @@ public final class LearnFragment extends Fragment {
         selectedCarId = car.id;
         prefs(requireContext()).edit().putString(PREF_SELECTED_CAR, car.id).apply();
         stepFiles.clear();
+        customLabels.clear();
         currentStepIndex = 0;
         resultsText.setText("Record the baseline plus at least one action, then tap Analyze.");
+        if (customLabelInput != null) {
+            customLabelInput.setText("");
+        }
+        if (customListText != null) {
+            customListText.setText("");
+        }
         refreshCarButtons();
         showStep(currentStepIndex);
     }
@@ -333,11 +388,16 @@ public final class LearnFragment extends Fragment {
             statusText.setText("Connect the board to Wi-Fi first (Connect tab).");
             return;
         }
+        if (isCustomRecording) {
+            statusText.setText("Wait for the current custom recording to finish.");
+            return;
+        }
         Step step = STEPS[currentStepIndex];
         stepRunning = true;
         startButton.setEnabled(false);
         repeatButton.setEnabled(false);
         nextButton.setEnabled(false);
+        customStartButton.setEnabled(false);
         statusText.setText("Recording... (" + step.durationSec + "s) -- do the action now.");
         Intent intent = new Intent(requireContext(), CanCaptureService.class)
                 .setAction(CanCaptureService.ACTION_START)
@@ -347,6 +407,51 @@ public final class LearnFragment extends Fragment {
                 .putExtra(CanCaptureService.EXTRA_CAR, selectedCarId);
         ContextCompat.startForegroundService(requireContext(), intent);
         autoStopHandler.postDelayed(autoStopRunnable, step.durationSec * 1000L);
+    }
+
+    private void startCustomAction() {
+        if (selectedCarId == null) {
+            customListText.setText("Select a car above first.");
+            return;
+        }
+        if (!boardLink.isWifiReady()) {
+            customListText.setText("Connect the board to Wi-Fi first (Connect tab).");
+            return;
+        }
+        if (stepRunning || isCustomRecording) {
+            customListText.setText("Wait for the current recording to finish.");
+            return;
+        }
+        String label = customLabelInput.getText().toString().trim();
+        if (label.isEmpty()) {
+            customListText.setText("Type a label for this action first.");
+            return;
+        }
+        customCounter++;
+        String slug = label.toLowerCase(java.util.Locale.US).replaceAll("[^a-z0-9]+", "_")
+                .replaceAll("^_+|_+$", "");
+        pendingCustomId = "other_" + customCounter + (slug.isEmpty() ? "" : "_" + slug);
+        pendingCustomLabel = label;
+        isCustomRecording = true;
+        startButton.setEnabled(false);
+        customStartButton.setEnabled(false);
+        customListText.setText("Recording \"" + label + "\"... (" + CUSTOM_DURATION_SEC + "s) -- do the action now.");
+        Intent intent = new Intent(requireContext(), CanCaptureService.class)
+                .setAction(CanCaptureService.ACTION_START)
+                .putExtra(CanCaptureService.EXTRA_BOARD_IP, boardLink.getBoardIp())
+                .putExtra(CanCaptureService.EXTRA_PASSIVE, true)
+                .putExtra(CanCaptureService.EXTRA_LABEL, "learn-" + selectedCarId + "-" + pendingCustomId)
+                .putExtra(CanCaptureService.EXTRA_CAR, selectedCarId);
+        ContextCompat.startForegroundService(requireContext(), intent);
+        autoStopHandler.postDelayed(autoStopRunnable, CUSTOM_DURATION_SEC * 1000L);
+    }
+
+    private void refreshCustomList() {
+        if (customLabels.isEmpty()) {
+            customListText.setText("");
+            return;
+        }
+        customListText.setText("Recorded: " + String.join(", ", customLabels.values()));
     }
 
     private void stopCurrentStep() {
@@ -405,35 +510,46 @@ public final class LearnFragment extends Fragment {
             if (step.id.equals("baseline") || !stepFiles.containsKey(step.id)) {
                 continue;
             }
-            Map<String, Set<String>> action = readIdsAndPayloads(stepFiles.get(step.id));
-            summary.append("== ").append(step.title).append(" ==\n");
-
-            boolean any = false;
-            for (Map.Entry<String, Set<String>> entry : action.entrySet()) {
-                String id = entry.getKey();
-                if (noisyIds.contains(id)) {
-                    continue;
-                }
-                if (!baseline.containsKey(id)) {
-                    summary.append("  NEW id ").append(id)
-                            .append(" (").append(entry.getValue().size()).append(" distinct payload(s))\n");
-                    any = true;
-                } else {
-                    Set<String> newPayloads = new LinkedHashSet<>(entry.getValue());
-                    newPayloads.removeAll(baseline.get(id));
-                    if (!newPayloads.isEmpty()) {
-                        summary.append("  CHANGED id ").append(id).append(": ")
-                                .append(String.join(", ", newPayloads)).append("\n");
-                        any = true;
-                    }
-                }
+            appendActionDiff(summary, step.title, step.id, baseline, noisyIds);
+        }
+        for (Map.Entry<String, String> customEntry : customLabels.entrySet()) {
+            if (!stepFiles.containsKey(customEntry.getKey())) {
+                continue;
             }
-            if (!any) {
-                summary.append("  (no new/changed IDs vs baseline -- try repeating the action, "
-                        + "or it may be outside the bus segment this OBD-II port exposes)\n");
-            }
-            summary.append("\n");
+            appendActionDiff(summary, customEntry.getValue() + " (other)", customEntry.getKey(), baseline, noisyIds);
         }
         resultsText.setText(summary.length() > 0 ? summary.toString() : "No steps recorded besides baseline yet.");
+    }
+
+    private void appendActionDiff(StringBuilder summary, String title, String fileId,
+                                   Map<String, Set<String>> baseline, Set<String> noisyIds) {
+        Map<String, Set<String>> action = readIdsAndPayloads(stepFiles.get(fileId));
+        summary.append("== ").append(title).append(" ==\n");
+
+        boolean any = false;
+        for (Map.Entry<String, Set<String>> entry : action.entrySet()) {
+            String id = entry.getKey();
+            if (noisyIds.contains(id)) {
+                continue;
+            }
+            if (!baseline.containsKey(id)) {
+                summary.append("  NEW id ").append(id)
+                        .append(" (").append(entry.getValue().size()).append(" distinct payload(s))\n");
+                any = true;
+            } else {
+                Set<String> newPayloads = new LinkedHashSet<>(entry.getValue());
+                newPayloads.removeAll(baseline.get(id));
+                if (!newPayloads.isEmpty()) {
+                    summary.append("  CHANGED id ").append(id).append(": ")
+                            .append(String.join(", ", newPayloads)).append("\n");
+                    any = true;
+                }
+            }
+        }
+        if (!any) {
+            summary.append("  (no new/changed IDs vs baseline -- try repeating the action, "
+                    + "or it may be outside the bus segment this OBD-II port exposes)\n");
+        }
+        summary.append("\n");
     }
 }
