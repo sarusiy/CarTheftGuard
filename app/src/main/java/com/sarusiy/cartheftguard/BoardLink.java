@@ -377,6 +377,7 @@ public final class BoardLink {
      */
     public void setCanMode(String mode, Consumer<Boolean> callback) {
         if (!isWifiReady()) {
+            emitStatus("Connect the board to Wi-Fi first", COLOR_ERROR);
             if (callback != null) {
                 post(() -> callback.accept(false));
             }
