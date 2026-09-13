@@ -15,6 +15,7 @@ import com.google.android.material.tabs.TabLayout;
 import com.sarusiy.cartheftguard.ui.ConnectFragment;
 import com.sarusiy.cartheftguard.ui.ControlFragment;
 import com.sarusiy.cartheftguard.ui.FaultsFragment;
+import com.sarusiy.cartheftguard.ui.FiatMonitorFragment;
 import com.sarusiy.cartheftguard.ui.LearnFragment;
 import com.sarusiy.cartheftguard.ui.MonitorFragment;
 import com.sarusiy.cartheftguard.ui.RecordFragment;
@@ -34,11 +35,12 @@ public class MainActivity extends AppCompatActivity {
     private static final int FRAGMENT_CONTAINER_ID = View.generateViewId();
 
     private static final String[] TAB_TITLES = {
-            "Connect", "Monitor", "Track", "Control", "Record", "Faults", "Learn"
+            "Connect", "Monitor", "Fiat", "Track", "Control", "Record", "Faults", "Learn"
     };
     private static final int[] TAB_ICONS = {
             android.R.drawable.stat_sys_data_bluetooth,
             android.R.drawable.ic_menu_view,
+            android.R.drawable.ic_menu_compass,
             android.R.drawable.ic_dialog_map,
             android.R.drawable.ic_menu_preferences,
             android.R.drawable.ic_menu_save,
@@ -112,11 +114,12 @@ public class MainActivity extends AppCompatActivity {
         switch (position) {
             case 0: return new ConnectFragment();
             case 1: return new MonitorFragment();
-            case 2: return new TrackFragment();
-            case 3: return new ControlFragment();
-            case 4: return new RecordFragment();
-            case 5: return new FaultsFragment();
-            case 6: return new LearnFragment();
+            case 2: return new FiatMonitorFragment();
+            case 3: return new TrackFragment();
+            case 4: return new ControlFragment();
+            case 5: return new RecordFragment();
+            case 6: return new FaultsFragment();
+            case 7: return new LearnFragment();
             default: return null;
         }
     }
