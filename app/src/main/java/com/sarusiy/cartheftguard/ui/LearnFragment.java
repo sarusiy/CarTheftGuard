@@ -78,31 +78,39 @@ public final class LearnFragment extends Fragment {
     private static final String PREF_SELECTED_CAR = "selected_car";
     private static final int CUSTOM_DURATION_SEC = 8;
 
+    /* Ignition ACC moved to step 2 (right after baseline), before every
+     * other action: confirmed on both the Fiat and the Fabia that the CAN
+     * bus is completely silent with the key fully off, so any action step
+     * recorded before the switch is at least at ACC captures nothing at
+     * all -- exactly what happened to lock/unlock/horn/headlights/door on
+     * both cars the first time through. Baseline itself stays switch-off
+     * on purpose (that silence is the point of that specific step). */
     private static final Step[] STEPS = {
             new Step("baseline", "1. Baseline",
                     "Engine off, don't touch anything. Lets us know what's on the bus with nothing happening.",
                     15),
-            new Step("lock", "2. Lock (key fob)",
+            new Step("ignition_acc", "2. Ignition ACC (no start)",
+                    "Turn the key/press start to ACC/ignition-on ONLY -- do not start the engine. "
+                            + "Leave it at ACC for the rest of the steps below -- the bus stays silent otherwise.",
+                    8),
+            new Step("lock", "3. Lock (key fob)",
                     "From outside the car, press the lock button on the key fob 2-3 times.",
                     8),
-            new Step("unlock", "3. Unlock (key fob)",
+            new Step("unlock", "4. Unlock (key fob)",
                     "From outside the car, press the unlock button on the key fob 2-3 times.",
                     8),
-            new Step("horn", "4. Horn",
+            new Step("horn", "5. Horn",
                     "Honk the horn (key fob panic button, or from inside) 1-2 times.",
                     6),
-            new Step("headlights", "5. Headlights",
+            new Step("headlights", "6. Headlights",
                     "Turn the headlights on (low or high beam) and leave them on.",
                     6),
-            new Step("door_open", "6. Open driver door",
+            new Step("door_open", "7. Open driver door",
                     "Manually open the driver's door.",
                     6),
-            new Step("door_close", "7. Close driver door",
+            new Step("door_close", "8. Close driver door",
                     "Close the driver's door.",
                     6),
-            new Step("ignition_acc", "8. Ignition ACC (no start)",
-                    "Turn the key/press start to ACC/ignition-on ONLY -- do not start the engine.",
-                    8),
     };
 
     private BoardLink boardLink;
@@ -123,6 +131,7 @@ public final class LearnFragment extends Fragment {
     private TextView instructionsText;
     private TextView statusText;
     private Button startButton;
+    private Button previousButton;
     private Button repeatButton;
     private Button nextButton;
     private android.widget.EditText customLabelInput;
@@ -165,11 +174,12 @@ public final class LearnFragment extends Fragment {
                     stepFiles.put(STEPS[currentStepIndex].id, file);
                     statusText.setText("Saved: " + new File(file).getName());
                     repeatButton.setEnabled(true);
-                    nextButton.setEnabled(currentStepIndex < STEPS.length - 1);
                     analyzeButton.setEnabled(stepFiles.containsKey("baseline") && stepFiles.size() > 1);
                 }
                 startButton.setEnabled(true);
                 startButton.setText("Start recording (" + STEPS[currentStepIndex].durationSec + "s)");
+                previousButton.setEnabled(currentStepIndex > 0);
+                nextButton.setEnabled(currentStepIndex < STEPS.length - 1);
                 customStartButton.setEnabled(true);
             }
         }
@@ -223,10 +233,16 @@ public final class LearnFragment extends Fragment {
 
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        repeatButton = Views.secondaryButton(context, "Repeat this step");
+        previousButton = Views.secondaryButton(context, "Previous");
+        previousButton.setEnabled(false);
+        previousButton.setOnClickListener(view -> goToPreviousStep());
+        row.addView(previousButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        repeatButton = Views.secondaryButton(context, "Repeat");
         repeatButton.setEnabled(false);
         repeatButton.setOnClickListener(view -> resetCurrentStepUi());
-        row.addView(repeatButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams repeatParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        repeatParams.leftMargin = Views.dp(context, 8);
+        row.addView(repeatButton, repeatParams);
         nextButton = Views.primaryButton(context, "Next step");
         nextButton.setEnabled(false);
         nextButton.setOnClickListener(view -> goToNextStep());
@@ -234,6 +250,12 @@ public final class LearnFragment extends Fragment {
         nextParams.leftMargin = Views.dp(context, 8);
         row.addView(nextButton, nextParams);
         root.addView(row, Views.matchWrapTop(context, 10));
+        TextView navNote = Views.label(context,
+                "You can move freely between steps -- recording one isn't required before moving on, "
+                        + "and Analyze only uses whichever steps you actually recorded.",
+                11, false);
+        navNote.setTextColor(0xff52616b);
+        root.addView(navNote, Views.matchWrapTop(context, 4));
 
         root.addView(Views.label(context, "Other actions (optional)", 16, true), Views.matchWrapTop(context, 24));
         root.addView(Views.label(context,
@@ -362,14 +384,21 @@ public final class LearnFragment extends Fragment {
         }
         startButton.setText("Start recording (" + step.durationSec + "s)");
         repeatButton.setEnabled(stepFiles.containsKey(step.id));
-        nextButton.setEnabled(stepFiles.containsKey(step.id) && index < STEPS.length - 1);
+        previousButton.setEnabled(index > 0);
+        nextButton.setEnabled(index < STEPS.length - 1);
     }
 
     private void resetCurrentStepUi() {
         statusText.setText("Not recorded yet.");
         startButton.setEnabled(true);
         repeatButton.setEnabled(false);
-        nextButton.setEnabled(false);
+    }
+
+    private void goToPreviousStep() {
+        if (currentStepIndex > 0) {
+            currentStepIndex--;
+            showStep(currentStepIndex);
+        }
     }
 
     private void goToNextStep() {
@@ -396,6 +425,7 @@ public final class LearnFragment extends Fragment {
         stepRunning = true;
         startButton.setEnabled(false);
         repeatButton.setEnabled(false);
+        previousButton.setEnabled(false);
         nextButton.setEnabled(false);
         customStartButton.setEnabled(false);
         statusText.setText("Recording... (" + step.durationSec + "s) -- do the action now.");
