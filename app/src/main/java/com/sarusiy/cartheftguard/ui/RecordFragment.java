@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -41,6 +42,31 @@ import java.util.List;
 
 /** Starts and monitors raw CAN recording to an app-owned CSV file. */
 public final class RecordFragment extends Fragment implements BoardLink.Listener {
+    /** Same idea as LearnFragment's car selector, kept as an independent
+     * selection/preference (own tab, own use case) -- without this,
+     * standalone recordings all land flat in can-captures/ with no way to
+     * tell later which vehicle they came from except by cross-referencing
+     * timestamps and CAN ID content by hand. "General" (null id) preserves
+     * the old flat-file behavior for bench/simulator use. */
+    private static final class Car {
+        final String id;
+        final String label;
+
+        Car(String id, String label) {
+            this.id = id;
+            this.label = label;
+        }
+    }
+
+    private static final Car[] CARS = {
+            new Car(null, "General (no car)"),
+            new Car("fiat500_2014", "Fiat 500 (2014)"),
+            new Car("fabia_2026", "Skoda Fabia (2026)"),
+    };
+
+    private static final String PREFS_NAME = "record_prefs";
+    private static final String PREF_SELECTED_CAR = "selected_car";
+
     private BoardLink boardLink;
     private Button startButton;
     private Button stopButton;
@@ -50,6 +76,8 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     private TextView droppedText;
     private TextView fileText;
     private TextView capturesText;
+    private LinearLayout carButtonsRow;
+    private String selectedCarId;
     private boolean receiverRegistered;
 
     /** Live raw-frame tail: independent of CanCaptureService/CSV recording --
@@ -107,6 +135,11 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     public void onAttach(@NonNull Context context) {
         super.onAttach(context);
         boardLink = BoardLink.getInstance(context);
+        selectedCarId = prefs(context).getString(PREF_SELECTED_CAR, null);
+    }
+
+    private SharedPreferences prefs(Context context) {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
     }
 
     @Nullable
@@ -123,6 +156,16 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         root.addView(Views.label(context, "CAN Recorder", 24, true), Views.matchWrap());
         connectionText = Views.label(context, "", 14, false);
         root.addView(connectionText, Views.matchWrapTop(context, 12));
+
+        root.addView(Views.label(context, "Recording for", 16, true), Views.matchWrapTop(context, 16));
+        carButtonsRow = new LinearLayout(context);
+        carButtonsRow.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(carButtonsRow, Views.matchWrapTop(context, 6));
+        TextView carNote = Views.label(context,
+                "Tags the file's folder so you can tell vehicles apart later -- pick \"General\" for bench/simulator use.",
+                11, false);
+        carNote.setTextColor(0xff52616b);
+        root.addView(carNote, Views.matchWrapTop(context, 2));
 
         passiveCheckBox = new CheckBox(context);
         passiveCheckBox.setText("Passive listen-only (real vehicle)");
@@ -210,6 +253,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         scroll.addView(root);
         updateConnectionState();
         refreshCaptureList();
+        refreshCarButtons();
         return scroll;
     }
 
@@ -281,6 +325,31 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         }
     }
 
+    private void refreshCarButtons() {
+        if (carButtonsRow == null) {
+            return;
+        }
+        Context context = requireContext();
+        carButtonsRow.removeAllViews();
+        for (int i = 0; i < CARS.length; i++) {
+            Car car = CARS[i];
+            boolean selected = java.util.Objects.equals(car.id, selectedCarId);
+            Button button = selected ? Views.primaryButton(context, car.label) : Views.secondaryButton(context, car.label);
+            button.setOnClickListener(view -> selectCar(car));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            if (i > 0) {
+                params.leftMargin = Views.dp(context, 8);
+            }
+            carButtonsRow.addView(button, params);
+        }
+    }
+
+    private void selectCar(Car car) {
+        selectedCarId = car.id;
+        prefs(requireContext()).edit().putString(PREF_SELECTED_CAR, car.id).apply();
+        refreshCarButtons();
+    }
+
     private void startRecording() {
         if (!boardLink.isWifiReady()) {
             updateConnectionState();
@@ -289,7 +358,8 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         Intent intent = new Intent(requireContext(), CanCaptureService.class)
                 .setAction(CanCaptureService.ACTION_START)
                 .putExtra(CanCaptureService.EXTRA_BOARD_IP, boardLink.getBoardIp())
-                .putExtra(CanCaptureService.EXTRA_PASSIVE, passiveCheckBox.isChecked());
+                .putExtra(CanCaptureService.EXTRA_PASSIVE, passiveCheckBox.isChecked())
+                .putExtra(CanCaptureService.EXTRA_CAR, selectedCarId);
         ContextCompat.startForegroundService(requireContext(), intent);
     }
 
