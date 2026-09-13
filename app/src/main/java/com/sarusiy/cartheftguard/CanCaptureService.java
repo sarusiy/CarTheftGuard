@@ -5,6 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
+import android.net.Network;
 import android.os.IBinder;
 
 import androidx.annotation.Nullable;
@@ -105,7 +106,8 @@ public final class CanCaptureService extends Service {
         }
 
         String boardIp = intent.getStringExtra(EXTRA_BOARD_IP);
-        if (boardIp == null || boardIp.trim().isEmpty()) {
+        Network network = BoardLink.getInstance(getApplicationContext()).getBoardNetwork();
+        if (boardIp == null || boardIp.trim().isEmpty() || network == null) {
             publishStatus("Board Wi-Fi is not connected");
             stopSelf();
             return START_NOT_STICKY;
@@ -118,14 +120,14 @@ public final class CanCaptureService extends Service {
         frameCount = 0;
         droppedCount = 0;
         startForeground(NOTIFICATION_ID, buildNotification("Starting CAN recording"));
-        executor.execute(() -> captureLoop(boardIp, passive, label, car));
+        executor.execute(() -> captureLoop(network, boardIp, passive, label, car));
         return START_NOT_STICKY;
     }
 
-    private void captureLoop(String boardIp, boolean passive, String label, String car) {
+    private void captureLoop(Network network, String boardIp, boolean passive, String label, String car) {
         Writer writer = null;
         try {
-            setCanMode(boardIp, passive);
+            setCanMode(network, boardIp, passive);
             File baseDirectory = new File(getExternalFilesDir(null), "can-captures");
             File directory = (car != null && !car.trim().isEmpty())
                     ? new File(baseDirectory, car.trim())
@@ -140,13 +142,13 @@ public final class CanCaptureService extends Service {
             writer = new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8);
             writer.write("phone_time_ms,board_time_us,sequence,bus,can_id,extended,rtr,dlc,data_hex,gps_fix,gps_lat,gps_lon,gps_speed_kmh,gps_heading_deg,gps_satellites\n");
 
-            JSONObject initialState = fetchBatch(boardIp, 0);
+            JSONObject initialState = fetchBatch(network, boardIp, 0);
             long after = initialState.optLong("latest", 0);
             long lastHardwareOverflow = initialState.optLong("hardware_overflow", 0);
             long lastStatusMs = 0;
             long lastGpsMs = 0;
             while (recording) {
-                JSONObject response = fetchBatch(boardIp, after);
+                JSONObject response = fetchBatch(network, boardIp, after);
                 droppedCount += response.optLong("dropped", 0);
                 long hardwareOverflow = response.optLong("hardware_overflow", lastHardwareOverflow);
                 if (hardwareOverflow >= lastHardwareOverflow) {
@@ -155,7 +157,7 @@ public final class CanCaptureService extends Service {
                 lastHardwareOverflow = hardwareOverflow;
                 long now = System.currentTimeMillis();
                 if (now - lastGpsMs >= GPS_RECORDING_POLL_MS) {
-                    gpsSnapshot = fetchGpsSnapshot(boardIp);
+                    gpsSnapshot = fetchGpsSnapshot(network, boardIp);
                     lastGpsMs = now;
                 }
                 JSONArray frames = response.getJSONArray("frames");
@@ -212,10 +214,10 @@ public final class CanCaptureService extends Service {
         }
     }
 
-    private void setCanMode(String boardIp, boolean passive) throws Exception {
+    private void setCanMode(Network network, String boardIp, boolean passive) throws Exception {
         byte[] body = (passive ? "passive" : "active").getBytes(StandardCharsets.UTF_8);
-        HttpURLConnection connection = (HttpURLConnection) new URL(
-                "http://" + boardIp + "/api/can/mode").openConnection();
+        HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL(
+                "http://" + boardIp + "/api/can/mode"));
         connection.setRequestMethod("POST");
         connection.setConnectTimeout(3000);
         connection.setReadTimeout(3000);
@@ -231,9 +233,9 @@ public final class CanCaptureService extends Service {
         }
     }
 
-    private JSONObject fetchBatch(String boardIp, long after) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) new URL(
-                "http://" + boardIp + "/api/can?after=" + after).openConnection();
+    private JSONObject fetchBatch(Network network, String boardIp, long after) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL(
+                "http://" + boardIp + "/api/can?after=" + after));
         connection.setRequestMethod("GET");
         connection.setConnectTimeout(3000);
         connection.setReadTimeout(3000);
@@ -256,10 +258,10 @@ public final class CanCaptureService extends Service {
         return new JSONObject(body.toString());
     }
 
-    private GpsSnapshot fetchGpsSnapshot(String boardIp) {
+    private GpsSnapshot fetchGpsSnapshot(Network network, String boardIp) {
         try {
-            HttpURLConnection connection = (HttpURLConnection) new URL(
-                    "http://" + boardIp + "/api/gps").openConnection();
+            HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL(
+                    "http://" + boardIp + "/api/gps"));
             connection.setRequestMethod("GET");
             connection.setConnectTimeout(1000);
             connection.setReadTimeout(1000);

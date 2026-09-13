@@ -41,10 +41,11 @@ public class AboutFragment extends Fragment {
         root.addView(infoRow(context, "Version", versionLabel(context)), Views.matchWrapTop(context, 12));
         root.addView(infoRow(context, "Package", context.getPackageName()), Views.matchWrapTop(context, 8));
         root.addView(infoRow(context, "Board", BoardLink.TARGET_NAME + " (JC-ESP32P4-M3)"), Views.matchWrapTop(context, 8));
-        root.addView(infoRow(context, "BLE service", BoardLink.SERVICE_UUID.toString()), Views.matchWrapTop(context, 8));
+        root.addView(infoRow(context, "Board Wi-Fi", BoardLink.AP_SSID), Views.matchWrapTop(context, 8));
 
         root.addView(Views.label(context, "About this app", 16, true), Views.matchWrapTop(context, 28));
-        root.addView(Views.label(context, "Connects to a JC-ESP32P4-M3 board over BLE, hands it Wi-Fi credentials, "
+        root.addView(Views.label(context, "Detects a JC-ESP32P4-M3 board nearby over BLE, then automatically joins "
+                        + "its own Wi-Fi in the background -- one way to connect, anywhere, no home network needed -- "
                         + "and lets you monitor and control it from your phone.", 14, false),
                 Views.matchWrapTop(context, 6));
 
