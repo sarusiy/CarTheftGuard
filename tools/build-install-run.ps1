@@ -28,6 +28,14 @@ Write-Host "Building..."
 & .\gradlew.bat assembleDebug -q
 if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
+Write-Host "Publishing to Drive..."
+& "$PSScriptRoot\publish-apk-to-drive.ps1"
+if ($LASTEXITCODE -ne 0) {
+    # Non-fatal: the app's Drive check just won't see a newer build until this
+    # is retried (e.g. rclone auth expired, offline) -- doesn't block install/test.
+    Write-Warning "Drive publish failed; continuing with local install anyway"
+}
+
 Write-Host "Installing..."
 & $adb install -r $apk
 
