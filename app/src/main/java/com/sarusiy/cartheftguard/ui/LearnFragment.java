@@ -26,6 +26,10 @@ import androidx.fragment.app.Fragment;
 
 import com.sarusiy.cartheftguard.BoardLink;
 import com.sarusiy.cartheftguard.CanCaptureService;
+import com.sarusiy.cartheftguard.UdsTargets;
+
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -111,16 +115,54 @@ public final class LearnFragment extends Fragment {
             new Step("horn", "5. Horn",
                     "Honk the horn (key fob panic button, or from inside) 1-2 times.",
                     6),
-            new Step("headlights", "6. Headlights",
-                    "Turn the headlights on (low or high beam) and leave them on.",
+            new Step("headlights", "6. Headlights (low beam)",
+                    "Turn the headlights on to LOW beam only and leave them on.",
                     6),
-            new Step("door_open", "7. Open driver door",
+            new Step("high_beam", "7. High beam",
+                    "With headlights already on, switch to HIGH beam and leave it on -- a separate "
+                            + "module from low-beam headlights, worth its own step.",
+                    6),
+            new Step("door_open", "8. Open driver door",
                     "Manually open the driver's door.",
                     6),
-            new Step("door_close", "8. Close driver door",
+            new Step("door_close", "9. Close driver door",
                     "Close the driver's door.",
                     6),
+            new Step("door_open_passenger", "10. Open passenger door",
+                    "Manually open the front passenger door.",
+                    6),
+            new Step("door_close_passenger", "11. Close passenger door",
+                    "Close the front passenger door.",
+                    6),
+            new Step("door_open_rear", "12. Open a rear door",
+                    "Manually open either rear door (left or right -- either is fine for this step).",
+                    6),
+            new Step("door_close_rear", "13. Close the rear door",
+                    "Close whichever rear door you just opened.",
+                    6),
     };
+
+    /* Which UDS body-module to also sweep (see UdsTargets) while a given
+     * step's CAN capture is running -- research-derived candidates, not yet
+     * confirmed against any real car. Steps not listed here (baseline,
+     * ignition_acc) have no UDS target: nothing to correlate against a
+     * "don't touch anything" step. Horn has no dedicated module of its own
+     * (see UDS_BODY_MODULE_RESEARCH.md) -- it's actuated via Central
+     * Convenience, same as locks. */
+    private static final Map<String, UdsTargets.Target> STEP_UDS_TARGETS = new LinkedHashMap<>();
+    static {
+        STEP_UDS_TARGETS.put("lock", UdsTargets.LOCK_ELECTRONICS);
+        STEP_UDS_TARGETS.put("unlock", UdsTargets.LOCK_ELECTRONICS);
+        STEP_UDS_TARGETS.put("horn", UdsTargets.CENTRAL_CONVENIENCE);
+        STEP_UDS_TARGETS.put("headlights", UdsTargets.HEADLIGHT_REGULATION);
+        STEP_UDS_TARGETS.put("high_beam", UdsTargets.HIGH_BEAM_ASSIST);
+        STEP_UDS_TARGETS.put("door_open", UdsTargets.DOOR_DRIVER);
+        STEP_UDS_TARGETS.put("door_close", UdsTargets.DOOR_DRIVER);
+        STEP_UDS_TARGETS.put("door_open_passenger", UdsTargets.DOOR_PASSENGER);
+        STEP_UDS_TARGETS.put("door_close_passenger", UdsTargets.DOOR_PASSENGER);
+        STEP_UDS_TARGETS.put("door_open_rear", UdsTargets.DOOR_REAR_DRIVER);
+        STEP_UDS_TARGETS.put("door_close_rear", UdsTargets.DOOR_REAR_DRIVER);
+    }
 
     private BoardLink boardLink;
     private int currentStepIndex;
@@ -140,6 +182,7 @@ public final class LearnFragment extends Fragment {
     private TextView titleText;
     private TextView instructionsText;
     private TextView statusText;
+    private TextView udsStatusText;
     private Button startButton;
     private Button previousButton;
     private Button repeatButton;
@@ -152,6 +195,45 @@ public final class LearnFragment extends Fragment {
 
     private final Handler autoStopHandler = new Handler(Looper.getMainLooper());
     private final Runnable autoStopRunnable = this::stopCurrentStep;
+
+    private static final int UDS_POLL_INTERVAL_MS = 1000;
+    private final Handler udsPollHandler = new Handler(Looper.getMainLooper());
+    private final Runnable udsPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isAdded()) {
+                return;
+            }
+            boardLink.fetchUdsScanStatus(json -> {
+                if (udsStatusText == null) {
+                    return;
+                }
+                if (json == null) {
+                    udsStatusText.setText("UDS scan: status unavailable");
+                    return;
+                }
+                try {
+                    JSONObject status = new JSONObject(json);
+                    String state = status.optString("state", "idle");
+                    int resultCount = status.optInt("result_count", 0);
+                    String currentDid = status.optString("current_did", "");
+                    if ("running".equals(state)) {
+                        udsStatusText.setText("UDS scan: running (probing " + currentDid + ", "
+                                + resultCount + " hit(s) so far)");
+                        udsPollHandler.postDelayed(this, UDS_POLL_INTERVAL_MS);
+                    } else if ("done".equals(state)) {
+                        udsStatusText.setText(resultCount == 0
+                                ? "UDS scan: done, no DID responded in this range"
+                                : "UDS scan: done, " + resultCount + " DID(s) responded -- see " + json);
+                    } else if ("error".equals(state)) {
+                        udsStatusText.setText("UDS scan: failed (board is in Passive mode?)");
+                    }
+                } catch (JSONException exception) {
+                    udsStatusText.setText("UDS scan: malformed status response");
+                }
+            });
+        }
+    };
 
     private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
         @Override
@@ -187,7 +269,7 @@ public final class LearnFragment extends Fragment {
                     analyzeButton.setEnabled(stepFiles.containsKey("baseline") && stepFiles.size() > 1);
                 }
                 startButton.setEnabled(true);
-                startButton.setText("Start recording (" + STEPS[currentStepIndex].durationSec + "s)");
+                startButton.setText("Start recording (" + effectiveDurationSec(STEPS[currentStepIndex]) + "s)");
                 previousButton.setEnabled(currentStepIndex > 0);
                 nextButton.setEnabled(currentStepIndex < STEPS.length - 1);
                 customStartButton.setEnabled(true);
@@ -248,6 +330,9 @@ public final class LearnFragment extends Fragment {
         statusText = Views.label(context, "", 13, false);
         statusText.setTextColor(0xff52616b);
         root.addView(statusText, Views.matchWrapTop(context, 8));
+        udsStatusText = Views.label(context, "", 12, false);
+        udsStatusText.setTextColor(0xff0b6e69);
+        root.addView(udsStatusText, Views.matchWrapTop(context, 4));
 
         startButton = Views.primaryButton(context, "Start recording");
         startButton.setOnClickListener(view -> startCurrentStep());
@@ -331,6 +416,7 @@ public final class LearnFragment extends Fragment {
     @Override
     public void onStop() {
         autoStopHandler.removeCallbacks(autoStopRunnable);
+        udsPollHandler.removeCallbacksAndMessages(null);
         if (receiverRegistered) {
             requireContext().unregisterReceiver(statusReceiver);
             receiverRegistered = false;
@@ -404,10 +490,28 @@ public final class LearnFragment extends Fragment {
                     : "Not recorded yet.");
             startButton.setEnabled(true);
         }
-        startButton.setText("Start recording (" + step.durationSec + "s)");
+        startButton.setText("Start recording (" + effectiveDurationSec(step) + "s)");
+        UdsTargets.Target target = STEP_UDS_TARGETS.get(step.id);
+        udsStatusText.setText(target != null
+                ? "Also probes (UDS): " + target.label + " -- adds up to "
+                        + UdsTargets.formatDuration(UdsTargets.worstCaseMillis(UdsTargets.DEFAULT_DID_START, UdsTargets.DEFAULT_DID_END))
+                        + " to this step's recording time"
+                : "");
         repeatButton.setEnabled(stepFiles.containsKey(step.id));
         previousButton.setEnabled(index > 0);
         nextButton.setEnabled(index < STEPS.length - 1);
+    }
+
+    /** Step duration extended to cover the worst case of its mapped UDS scan (if any),
+     * so the CAN capture's own auto-stop timer doesn't cut the scan off mid-sweep. */
+    private int effectiveDurationSec(Step step) {
+        UdsTargets.Target target = STEP_UDS_TARGETS.get(step.id);
+        if (target == null) {
+            return step.durationSec;
+        }
+        long udsMs = UdsTargets.worstCaseMillis(UdsTargets.DEFAULT_DID_START, UdsTargets.DEFAULT_DID_END);
+        int udsSec = (int) ((udsMs + 999) / 1000);
+        return Math.max(step.durationSec, udsSec);
     }
 
     private void resetCurrentStepUi() {
@@ -444,13 +548,14 @@ public final class LearnFragment extends Fragment {
             return;
         }
         Step step = STEPS[currentStepIndex];
+        int durationSec = effectiveDurationSec(step);
         stepRunning = true;
         startButton.setEnabled(false);
         repeatButton.setEnabled(false);
         previousButton.setEnabled(false);
         nextButton.setEnabled(false);
         customStartButton.setEnabled(false);
-        statusText.setText("Recording... (" + step.durationSec + "s) -- do the action now.");
+        statusText.setText("Recording... (" + durationSec + "s) -- do the action now.");
         Intent intent = new Intent(requireContext(), CanCaptureService.class)
                 .setAction(CanCaptureService.ACTION_START)
                 .putExtra(CanCaptureService.EXTRA_BOARD_IP, boardLink.getBoardIp())
@@ -458,7 +563,24 @@ public final class LearnFragment extends Fragment {
                 .putExtra(CanCaptureService.EXTRA_LABEL, "learn-" + selectedCarId + "-" + step.id)
                 .putExtra(CanCaptureService.EXTRA_CAR, selectedCarId);
         ContextCompat.startForegroundService(requireContext(), intent);
-        autoStopHandler.postDelayed(autoStopRunnable, step.durationSec * 1000L);
+        autoStopHandler.postDelayed(autoStopRunnable, durationSec * 1000L);
+
+        UdsTargets.Target target = STEP_UDS_TARGETS.get(step.id);
+        udsPollHandler.removeCallbacksAndMessages(null);
+        if (target != null && !passiveCheckBox.isChecked()) {
+            udsStatusText.setText("UDS scan: starting against " + target.label + "...");
+            boardLink.startUdsScan(target, UdsTargets.DEFAULT_DID_START, UdsTargets.DEFAULT_DID_END, started -> {
+                if (started) {
+                    udsPollHandler.postDelayed(udsPollRunnable, UDS_POLL_INTERVAL_MS);
+                } else {
+                    udsStatusText.setText("UDS scan: failed to start");
+                }
+            });
+        } else if (target != null) {
+            udsStatusText.setText("UDS scan skipped -- requires Active mode (uncheck Passive above)");
+        } else {
+            udsStatusText.setText("");
+        }
     }
 
     private void startCustomAction() {

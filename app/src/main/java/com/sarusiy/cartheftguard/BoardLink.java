@@ -30,6 +30,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
@@ -925,6 +926,77 @@ public final class BoardLink {
         networkExecutor.execute(() -> {
             try {
                 HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/ota"));
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                post(() -> callback.accept(code < 400 ? response : null));
+            } catch (Exception exception) {
+                post(() -> callback.accept(null));
+            }
+        });
+    }
+
+    /**
+     * Starts a UDS DID sweep against one body/comfort module -- see
+     * {@link UdsTargets} and JC-ESP32P4-M3's UDS_BODY_MODULE_RESEARCH.md.
+     * Fires and returns; poll {@link #fetchUdsScanStatus} for progress/results.
+     */
+    public void startUdsScan(UdsTargets.Target target, int didStart, int didEnd, Consumer<Boolean> callback) {
+        Network network = boardNetwork;
+        if (network == null) {
+            emitStatus("Connect to the board first", COLOR_ERROR);
+            if (callback != null) {
+                post(() -> callback.accept(false));
+            }
+            return;
+        }
+        networkExecutor.execute(() -> {
+            boolean success = false;
+            try {
+                byte[] body = String.format(Locale.US, "%X,%X,0,%X,%X",
+                        target.requestId, target.responseId, didStart, didEnd).getBytes(StandardCharsets.UTF_8);
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/uds/scan"));
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setDoOutput(true);
+                connection.setUseCaches(false);
+                connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+                connection.setFixedLengthStreamingMode(body.length);
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    output.write(body);
+                }
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                emitLog("UDS scan (" + target.label + "): HTTP " + code + " -> " + response);
+                success = code < 400;
+            } catch (Exception exception) {
+                emitLog("UDS scan request failed: " + exception.getMessage());
+            }
+            boolean finalSuccess = success;
+            if (callback != null) {
+                post(() -> callback.accept(finalSuccess));
+            }
+        });
+    }
+
+    /** Current UDS scan progress/results as raw JSON (state, current_did, result_count, results[]). */
+    public void fetchUdsScanStatus(Consumer<String> callback) {
+        if (callback == null) {
+            return;
+        }
+        Network network = boardNetwork;
+        if (network == null) {
+            callback.accept(null);
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/uds/scan"));
                 connection.setRequestMethod("GET");
                 connection.setConnectTimeout(3000);
                 connection.setReadTimeout(3000);

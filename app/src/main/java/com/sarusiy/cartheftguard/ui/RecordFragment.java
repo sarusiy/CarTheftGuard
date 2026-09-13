@@ -13,8 +13,11 @@ import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -26,6 +29,7 @@ import androidx.fragment.app.Fragment;
 
 import com.sarusiy.cartheftguard.BoardLink;
 import com.sarusiy.cartheftguard.CanCaptureService;
+import com.sarusiy.cartheftguard.UdsTargets;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -66,6 +70,12 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
 
     private static final String PREFS_NAME = "record_prefs";
     private static final String PREF_SELECTED_CAR = "selected_car";
+    /* Index into UdsTargets.ALL, or -1 for "None" -- storing the array index
+     * rather than the target object itself since Target has no separate id
+     * field; stable as long as UdsTargets.ALL's order isn't reshuffled. */
+    private static final String PREF_UDS_TARGET_INDEX = "uds_target_index";
+    private static final String PREF_UDS_DID_START = "uds_did_start";
+    private static final String PREF_UDS_DID_END = "uds_did_end";
 
     private BoardLink boardLink;
     private Button startButton;
@@ -79,6 +89,55 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     private LinearLayout carButtonsRow;
     private String selectedCarId;
     private boolean receiverRegistered;
+
+    /** null = no UDS scan alongside this recording (default -- opt-in, since
+     * not every recording is meant to probe a body module). */
+    private UdsTargets.Target selectedUdsTarget;
+    private int persistedUdsDidStart;
+    private int persistedUdsDidEnd;
+    private LinearLayout udsTargetButtonsColumn;
+    private EditText udsDidStartInput;
+    private EditText udsDidEndInput;
+    private TextView udsEstimateText;
+    private TextView udsStatusText;
+    private static final int UDS_POLL_INTERVAL_MS = 1000;
+    private final Handler udsPollHandler = new Handler(Looper.getMainLooper());
+    private final Runnable udsPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isAdded()) {
+                return;
+            }
+            boardLink.fetchUdsScanStatus(json -> {
+                if (udsStatusText == null) {
+                    return;
+                }
+                if (json == null) {
+                    udsStatusText.setText("UDS scan: status unavailable");
+                    return;
+                }
+                try {
+                    JSONObject status = new JSONObject(json);
+                    String state = status.optString("state", "idle");
+                    int resultCount = status.optInt("result_count", 0);
+                    String currentDid = status.optString("current_did", "");
+                    if ("running".equals(state)) {
+                        udsStatusText.setText("UDS scan: running (probing " + currentDid + ", "
+                                + resultCount + " hit(s) so far) -- keep recording until this finishes");
+                        udsPollHandler.postDelayed(this, UDS_POLL_INTERVAL_MS);
+                    } else if ("done".equals(state)) {
+                        udsStatusText.setText(resultCount == 0
+                                ? "UDS scan: done, no DID responded in this range"
+                                : "UDS scan: done, " + resultCount + " DID(s) responded -- see " + json);
+                    } else if ("error".equals(state)) {
+                        udsStatusText.setText("UDS scan: failed (board is in Passive mode?)");
+                    }
+                } catch (JSONException exception) {
+                    udsStatusText.setText("UDS scan: malformed status response");
+                }
+            });
+        }
+    };
 
     /** Live raw-frame tail: independent of CanCaptureService/CSV recording --
      * both just poll the same GET /api/can, so you can watch live without
@@ -136,6 +195,11 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         super.onAttach(context);
         boardLink = BoardLink.getInstance(context);
         selectedCarId = prefs(context).getString(PREF_SELECTED_CAR, null);
+        int udsTargetIndex = prefs(context).getInt(PREF_UDS_TARGET_INDEX, -1);
+        selectedUdsTarget = (udsTargetIndex >= 0 && udsTargetIndex < UdsTargets.ALL.length)
+                ? UdsTargets.ALL[udsTargetIndex] : null;
+        persistedUdsDidStart = prefs(context).getInt(PREF_UDS_DID_START, UdsTargets.DEFAULT_DID_START);
+        persistedUdsDidEnd = prefs(context).getInt(PREF_UDS_DID_END, UdsTargets.DEFAULT_DID_END);
     }
 
     private SharedPreferences prefs(Context context) {
@@ -177,6 +241,53 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                 12, false);
         modeNote.setTextColor(0xff52616b);
         root.addView(modeNote, Views.matchWrapTop(context, 2));
+
+        root.addView(Views.label(context, "UDS body-module scan (optional)", 16, true), Views.matchWrapTop(context, 20));
+        root.addView(Views.label(context, "Pick a candidate module (research: UDS_BODY_MODULE_RESEARCH.md) to also "
+                        + "sweep for DIDs while this recording runs -- toggle the matching real action (lock, door, "
+                        + "etc.) while it's probing. Requires Active mode (uncheck Passive above).", 12, false),
+                Views.matchWrapTop(context, 4));
+        udsTargetButtonsColumn = new LinearLayout(context);
+        udsTargetButtonsColumn.setOrientation(LinearLayout.VERTICAL);
+        root.addView(udsTargetButtonsColumn, Views.matchWrapTop(context, 8));
+        refreshUdsTargetButtons();
+
+        LinearLayout didRow = new LinearLayout(context);
+        didRow.setOrientation(LinearLayout.HORIZONTAL);
+        udsDidStartInput = Views.input(context, "DID start (hex)", android.text.InputType.TYPE_CLASS_TEXT);
+        udsDidStartInput.setText(Integer.toHexString(persistedUdsDidStart).toUpperCase(java.util.Locale.US));
+        didRow.addView(udsDidStartInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        udsDidEndInput = Views.input(context, "DID end (hex)", android.text.InputType.TYPE_CLASS_TEXT);
+        udsDidEndInput.setText(Integer.toHexString(persistedUdsDidEnd).toUpperCase(java.util.Locale.US));
+        LinearLayout.LayoutParams didEndParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        didEndParams.leftMargin = Views.dp(context, 8);
+        didRow.addView(udsDidEndInput, didEndParams);
+        root.addView(didRow, Views.matchWrapTop(context, 8));
+
+        TextWatcher didRangeWatcher = new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                updateUdsEstimate();
+            }
+        };
+        udsDidStartInput.addTextChangedListener(didRangeWatcher);
+        udsDidEndInput.addTextChangedListener(didRangeWatcher);
+
+        udsEstimateText = Views.label(context, "", 12, false);
+        udsEstimateText.setTextColor(0xff52616b);
+        root.addView(udsEstimateText, Views.matchWrapTop(context, 4));
+        udsStatusText = Views.label(context, "", 12, false);
+        udsStatusText.setTextColor(0xff0b6e69);
+        root.addView(udsStatusText, Views.matchWrapTop(context, 4));
+        updateUdsEstimate();
 
         startButton = Views.primaryButton(context, "Start recording");
         startButton.setOnClickListener(view -> startRecording());
@@ -275,6 +386,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     @Override
     public void onStop() {
         liveHandler.removeCallbacks(livePollRunnable);
+        udsPollHandler.removeCallbacksAndMessages(null);
         if (receiverRegistered) {
             requireContext().unregisterReceiver(statusReceiver);
             receiverRegistered = false;
@@ -350,6 +462,75 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         refreshCarButtons();
     }
 
+    /** "None" plus one row per UdsTargets.ALL entry -- a vertical list rather
+     * than the car selector's horizontal row since there are 8 candidates
+     * plus "None", too many to fit legibly side by side. */
+    private void refreshUdsTargetButtons() {
+        if (udsTargetButtonsColumn == null) {
+            return;
+        }
+        Context context = requireContext();
+        udsTargetButtonsColumn.removeAllViews();
+
+        Button noneButton = selectedUdsTarget == null
+                ? Views.primaryButton(context, "None (just record)")
+                : Views.secondaryButton(context, "None (just record)");
+        noneButton.setOnClickListener(view -> selectUdsTarget(null));
+        udsTargetButtonsColumn.addView(noneButton, Views.matchWrapTop(context, 0));
+
+        for (UdsTargets.Target target : UdsTargets.ALL) {
+            boolean selected = target == selectedUdsTarget;
+            Button button = selected ? Views.primaryButton(context, target.label) : Views.secondaryButton(context, target.label);
+            button.setOnClickListener(view -> selectUdsTarget(target));
+            udsTargetButtonsColumn.addView(button, Views.matchWrapTop(context, 6));
+        }
+    }
+
+    private void selectUdsTarget(UdsTargets.Target target) {
+        selectedUdsTarget = target;
+        int index = -1;
+        for (int i = 0; i < UdsTargets.ALL.length; i++) {
+            if (UdsTargets.ALL[i] == target) {
+                index = i;
+                break;
+            }
+        }
+        prefs(requireContext()).edit().putInt(PREF_UDS_TARGET_INDEX, index).apply();
+        refreshUdsTargetButtons();
+        updateUdsEstimate();
+    }
+
+    private int parseHexOrDefault(EditText input, int fallback) {
+        try {
+            return Integer.parseInt(input.getText().toString().trim(), 16);
+        } catch (NumberFormatException exception) {
+            return fallback;
+        }
+    }
+
+    private void updateUdsEstimate() {
+        if (udsEstimateText == null) {
+            return;
+        }
+        if (selectedUdsTarget == null) {
+            udsEstimateText.setText("");
+            return;
+        }
+        int didStart = parseHexOrDefault(udsDidStartInput, UdsTargets.DEFAULT_DID_START);
+        int didEnd = parseHexOrDefault(udsDidEndInput, UdsTargets.DEFAULT_DID_END);
+        prefs(requireContext()).edit()
+                .putInt(PREF_UDS_DID_START, didStart)
+                .putInt(PREF_UDS_DID_END, didEnd)
+                .apply();
+        if (didEnd < didStart) {
+            udsEstimateText.setText("DID end must be >= DID start.");
+            return;
+        }
+        long worstCaseMs = UdsTargets.worstCaseMillis(didStart, didEnd);
+        udsEstimateText.setText("Worst case (all timeouts): " + UdsTargets.formatDuration(worstCaseMs)
+                + " -- keep recording running at least that long to be sure the sweep finishes.");
+    }
+
     private void startRecording() {
         if (!boardLink.isWifiReady()) {
             updateConnectionState();
@@ -361,6 +542,24 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                 .putExtra(CanCaptureService.EXTRA_PASSIVE, passiveCheckBox.isChecked())
                 .putExtra(CanCaptureService.EXTRA_CAR, selectedCarId);
         ContextCompat.startForegroundService(requireContext(), intent);
+
+        udsPollHandler.removeCallbacksAndMessages(null);
+        if (selectedUdsTarget != null && !passiveCheckBox.isChecked()) {
+            int didStart = parseHexOrDefault(udsDidStartInput, UdsTargets.DEFAULT_DID_START);
+            int didEnd = parseHexOrDefault(udsDidEndInput, UdsTargets.DEFAULT_DID_END);
+            udsStatusText.setText("UDS scan: starting against " + selectedUdsTarget.label + "...");
+            boardLink.startUdsScan(selectedUdsTarget, didStart, didEnd, started -> {
+                if (started) {
+                    udsPollHandler.postDelayed(udsPollRunnable, UDS_POLL_INTERVAL_MS);
+                } else {
+                    udsStatusText.setText("UDS scan: failed to start");
+                }
+            });
+        } else if (selectedUdsTarget != null) {
+            udsStatusText.setText("UDS scan skipped -- requires Active mode (uncheck Passive above)");
+        } else {
+            udsStatusText.setText("");
+        }
     }
 
     private void stopRecording() {
