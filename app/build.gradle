@@ -2,6 +2,36 @@ plugins {
     id 'com.android.application'
 }
 
+/* versionCode/versionName used to be hand-edited constants that, in
+ * practice, never actually got bumped across many real rebuilds -- which
+ * defeated the whole point of showing them in-app (Connect/About/Fiat tabs
+ * all display this specifically to confirm which build is installed after
+ * a reinstall, per those screens' own comments). Deriving both from git
+ * instead means the displayed version can never go stale silently again:
+ * versionCode is the exact commit count (monotonically increasing, exactly
+ * what Android requires), and versionName carries the short commit hash so
+ * you can always tell precisely which commit is running on the phone. */
+def gitCommitCount = {
+    try {
+        def process = "git rev-list --count HEAD".execute(null, rootDir)
+        process.waitFor()
+        return process.text.trim().toInteger()
+    } catch (Exception ignored) {
+        return 1
+    }
+}
+
+def gitShortHash = {
+    try {
+        def process = "git rev-parse --short HEAD".execute(null, rootDir)
+        process.waitFor()
+        def hash = process.text.trim()
+        return hash.isEmpty() ? "unknown" : hash
+    } catch (Exception ignored) {
+        return "unknown"
+    }
+}
+
 android {
     namespace 'com.sarusiy.cartheftguard'
     compileSdk 35
@@ -10,8 +40,8 @@ android {
         applicationId 'com.sarusiy.cartheftguard'
         minSdk 26
         targetSdk 35
-        versionCode 24
-        versionName '0.5.0'
+        versionCode gitCommitCount()
+        versionName "0.6.0-" + gitShortHash()
     }
 
     compileOptions {
