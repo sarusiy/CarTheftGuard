@@ -176,7 +176,15 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         capturesText.setTextIsSelectable(true);
         root.addView(capturesText, Views.matchWrapTop(context, 8));
 
-        root.addView(Views.label(context, "Live raw frames", 16, true), Views.matchWrapTop(context, 24));
+        LinearLayout liveHeader = new LinearLayout(context);
+        liveHeader.setOrientation(LinearLayout.HORIZONTAL);
+        liveHeader.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        liveHeader.addView(Views.label(context, "Live raw frames", 16, true),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button clearLiveButton = Views.secondaryButton(context, "Clear");
+        clearLiveButton.setOnClickListener(view -> clearLiveFrames());
+        liveHeader.addView(clearLiveButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(liveHeader, Views.matchWrapTop(context, 24));
         liveCheckBox = new CheckBox(context);
         liveCheckBox.setText("Show live (independent of recording -- for watching while you act on the car)");
         liveCheckBox.setTextColor(0xff1f2933);
@@ -259,6 +267,17 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
             }
         } catch (JSONException exception) {
             // Transient/partial response -- next poll will retry; not worth surfacing to the user.
+        }
+    }
+
+    /** Clears only the on-screen tail, not liveAfterSeq -- polling keeps
+     * following on from wherever it already was, so this just gives a clean
+     * screen to watch the next action against instead of a running-together
+     * scroll of whatever happened before. */
+    private void clearLiveFrames() {
+        liveLines.clear();
+        if (liveText != null) {
+            liveText.setText("");
         }
     }
 
