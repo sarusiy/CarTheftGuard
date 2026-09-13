@@ -140,7 +140,16 @@ public final class CanCaptureService extends Service {
             File file = new File(directory, prefix + "-" + stamp + ".csv");
             filePath = file.getAbsolutePath();
             writer = new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8);
-            writer.write("phone_time_ms,board_time_us,sequence,bus,can_id,extended,rtr,dlc,data_hex,gps_fix,gps_lat,gps_lon,gps_speed_kmh,gps_heading_deg,gps_satellites\n");
+            writer.write("phone_time_ms,board_time_us,sequence,bus,can_id,extended,rtr,dlc,data_hex,gps_fix,gps_lat,gps_lon,gps_speed_kmh,gps_heading_deg,gps_satellites,can_mode\n");
+            /* Set once at the top of this method (setCanMode) and not changed
+             * again anywhere in this recording's own loop, so it's valid for
+             * every row -- stamped per-row (not just once in a file header)
+             * so analysis scripts that just grep/awk columns don't need to
+             * special-case a separate header line to know which mode a given
+             * frame was captured under (e.g. distinguishing a real vehicle
+             * signal from a Listen-Only no-ACK retransmission storm, which
+             * only happens in Passive mode). */
+            String canModeColumn = passive ? "passive" : "active";
 
             JSONObject initialState = fetchBatch(network, boardIp, 0);
             long after = initialState.optLong("latest", 0);
@@ -179,7 +188,8 @@ public final class CanCaptureService extends Service {
                             + String.format(Locale.US, "%.6f", gps.lon) + ","
                             + String.format(Locale.US, "%.1f", gps.speedKmh) + ","
                             + String.format(Locale.US, "%.1f", gps.headingDeg) + ","
-                            + gps.satellites + "\n");
+                            + gps.satellites + ","
+                            + canModeColumn + "\n");
                     after = sequence;
                     frameCount++;
                 }

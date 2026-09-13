@@ -14,6 +14,7 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -76,6 +77,14 @@ public final class LearnFragment extends Fragment {
 
     private static final String PREFS_NAME = "learn_prefs";
     private static final String PREF_SELECTED_CAR = "selected_car";
+    /* Default false (Active, not Listen-Only): a direct comparison on the Fabia found
+     * Passive mode's lack of CAN ACK causes the sending node to auto-retransmit an
+     * unacknowledged frame continuously (~700-800x its real rate in one case), which both
+     * distorts frequency analysis and crowds other traffic out of the MCP2515's small
+     * hardware RX buffer -- see captures/fabia_2026/FABIA_ANALYSIS.md. Active mode's only
+     * extra cost is the board's own background OBD polling also being on the bus, which is
+     * a small, fixed, easily-filtered set of IDs (0x7DF request, 0x7E8-0x7EF responses). */
+    private static final String PREF_PASSIVE = "passive_recording";
     private static final int CUSTOM_DURATION_SEC = 8;
 
     /* Ignition ACC moved to step 2 (right after baseline), before every
@@ -127,6 +136,7 @@ public final class LearnFragment extends Fragment {
     private int customCounter;
 
     private LinearLayout carButtonsRow;
+    private CheckBox passiveCheckBox;
     private TextView titleText;
     private TextView instructionsText;
     private TextView statusText;
@@ -218,6 +228,18 @@ public final class LearnFragment extends Fragment {
         carButtonsRow.setOrientation(LinearLayout.HORIZONTAL);
         root.addView(carButtonsRow, Views.matchWrapTop(context, 4));
         refreshCarButtons();
+
+        passiveCheckBox = new CheckBox(context);
+        passiveCheckBox.setText("Passive listen-only (real vehicle)");
+        passiveCheckBox.setTextColor(0xff1f2933);
+        passiveCheckBox.setChecked(prefs(context).getBoolean(PREF_PASSIVE, false));
+        passiveCheckBox.setOnCheckedChangeListener((button, checked) ->
+                prefs(context).edit().putBoolean(PREF_PASSIVE, checked).apply());
+        root.addView(passiveCheckBox, Views.matchWrapTop(context, 12));
+        root.addView(Views.label(context, "Active (unchecked, recommended) also ACKs frames on the bus, "
+                        + "which avoids a real distortion Passive mode causes -- see FABIA_ANALYSIS.md. "
+                        + "Passive adds no traffic of its own but sees less real traffic as a result.", 11, false),
+                Views.matchWrapTop(context, 2));
 
         titleText = Views.label(context, "", 18, true);
         root.addView(titleText, Views.matchWrapTop(context, 24));
@@ -432,7 +454,7 @@ public final class LearnFragment extends Fragment {
         Intent intent = new Intent(requireContext(), CanCaptureService.class)
                 .setAction(CanCaptureService.ACTION_START)
                 .putExtra(CanCaptureService.EXTRA_BOARD_IP, boardLink.getBoardIp())
-                .putExtra(CanCaptureService.EXTRA_PASSIVE, true)
+                .putExtra(CanCaptureService.EXTRA_PASSIVE, passiveCheckBox.isChecked())
                 .putExtra(CanCaptureService.EXTRA_LABEL, "learn-" + selectedCarId + "-" + step.id)
                 .putExtra(CanCaptureService.EXTRA_CAR, selectedCarId);
         ContextCompat.startForegroundService(requireContext(), intent);
@@ -469,7 +491,7 @@ public final class LearnFragment extends Fragment {
         Intent intent = new Intent(requireContext(), CanCaptureService.class)
                 .setAction(CanCaptureService.ACTION_START)
                 .putExtra(CanCaptureService.EXTRA_BOARD_IP, boardLink.getBoardIp())
-                .putExtra(CanCaptureService.EXTRA_PASSIVE, true)
+                .putExtra(CanCaptureService.EXTRA_PASSIVE, passiveCheckBox.isChecked())
                 .putExtra(CanCaptureService.EXTRA_LABEL, "learn-" + selectedCarId + "-" + pendingCustomId)
                 .putExtra(CanCaptureService.EXTRA_CAR, selectedCarId);
         ContextCompat.startForegroundService(requireContext(), intent);
