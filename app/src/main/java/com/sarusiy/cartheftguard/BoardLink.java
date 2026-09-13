@@ -72,6 +72,13 @@ public final class BoardLink {
         default void onObdData(String json) {}
         default void onGpsData(String json) {}
         default void onDtcData(String json) {}
+        default void onVinData(String json) {}
+    }
+
+    /** Progress/result callback for {@link #pushFirmware}; both methods run on the main thread. */
+    public interface OtaListener {
+        default void onProgress(int percent) {}
+        void onResult(boolean success, String message);
     }
 
     private static volatile BoardLink instance;
@@ -111,6 +118,7 @@ public final class BoardLink {
     private final AtomicBoolean obdFetchInFlight = new AtomicBoolean(false);
     private final AtomicBoolean gpsFetchInFlight = new AtomicBoolean(false);
     private final AtomicBoolean dtcFetchInFlight = new AtomicBoolean(false);
+    private final AtomicBoolean vinFetchInFlight = new AtomicBoolean(false);
 
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override
@@ -758,6 +766,174 @@ public final class BoardLink {
             } catch (Exception exception) {
                 emitLog("Fault clear request failed: " + exception.getMessage());
                 emitStatus("Fault clear request failed", COLOR_ERROR);
+            }
+        });
+    }
+
+    /**
+     * Triggers a one-off Mode 09 PID 0x02 (VIN) read on the board. Unlike
+     * clearDtcs/simulateFault, the result isn't ready by the time this POST
+     * returns -- the board answers it asynchronously from its own OBD
+     * polling loop (see main.c's obd_query_vin_if_requested), typically a
+     * few seconds later. Call fetchVin() afterward (the caller is
+     * responsible for polling a few times) to pick up the result.
+     */
+    public void readVin() {
+        Network network = boardNetwork;
+        if (network == null) {
+            emitStatus("Connect the board to Wi-Fi first", COLOR_ERROR);
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/obd/vin"));
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setFixedLengthStreamingMode(0);
+                connection.setDoOutput(true);
+                connection.getOutputStream().close();
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                emitLog("VIN read: " + response);
+            } catch (Exception exception) {
+                emitLog("VIN read request failed: " + exception.getMessage());
+                emitStatus("VIN read request failed", COLOR_ERROR);
+            }
+        });
+    }
+
+    /**
+     * Fetches the last VIN read's result (JSON: {@code vin}, {@code status}
+     * -- "none"/"ok"/"timeout"/"error"), delivered via {@link Listener#onVinData}.
+     */
+    public void fetchVin() {
+        Network network = boardNetwork;
+        if (network == null) {
+            return;
+        }
+        if (!vinFetchInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/obd/vin"));
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                if (code >= 400) {
+                    emitLog("VIN fetch failed: HTTP " + code);
+                    return;
+                }
+                post(() -> {
+                    for (Listener listener : listeners) {
+                        listener.onVinData(response);
+                    }
+                });
+            } catch (Exception exception) {
+                emitLog("VIN fetch failed: " + exception.getMessage());
+            } finally {
+                vinFetchInFlight.set(false);
+            }
+        });
+    }
+
+    /**
+     * Pushes a new firmware image to the board over the existing Wi-Fi link
+     * (POST /api/ota) so it can be updated without a USB/PC visit -- build a
+     * fix at the PC, get the .bin onto the phone by any means (adb push,
+     * cloud drive, email), then apply it at the car. The board streams the
+     * body straight into its inactive OTA partition and reboots into it once
+     * fully received and validated (see main.c's ota_http_handler); a bad
+     * image is rejected before boot, and CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+     * rolls the board back automatically if the new image crash-loops after
+     * boot -- callers should still independently confirm the board came back
+     * (e.g. poll fetchOtaStatus or /api/health after a delay) rather than
+     * trusting this callback's success alone, since a successful push
+     * legitimately ends with the board rebooting mid-connection, which can
+     * itself surface here as a socket exception rather than a clean response.
+     */
+    public void pushFirmware(byte[] firmware, OtaListener listener) {
+        if (listener == null) {
+            return;
+        }
+        Network network = boardNetwork;
+        if (network == null) {
+            emitStatus("Connect to the board first", COLOR_ERROR);
+            post(() -> listener.onResult(false, "Not connected to the board"));
+            return;
+        }
+        networkExecutor.execute(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/ota"));
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(20000);
+                connection.setDoOutput(true);
+                connection.setUseCaches(false);
+                connection.setRequestProperty("Content-Type", "application/octet-stream");
+                connection.setFixedLengthStreamingMode(firmware.length);
+
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    int chunkSize = 4096;
+                    int sent = 0;
+                    while (sent < firmware.length) {
+                        int len = Math.min(chunkSize, firmware.length - sent);
+                        output.write(firmware, sent, len);
+                        sent += len;
+                        int percent = (int) (100L * sent / firmware.length);
+                        post(() -> listener.onProgress(percent));
+                    }
+                }
+
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                emitLog("OTA push: HTTP " + code + " -> " + response);
+                boolean success = code < 400;
+                post(() -> listener.onResult(success, response));
+            } catch (Exception exception) {
+                emitLog("OTA push: connection ended (" + exception.getMessage() + ") -- board may have rebooted into the new image");
+                post(() -> listener.onResult(false, "Connection ended (board may have rebooted) -- check status below"));
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        });
+    }
+
+    /**
+     * Current OTA state and which app partition is actually running --
+     * toggles between ota_0/ota_1 on every successful update, so this is how
+     * a push gets independently confirmed rather than trusting pushFirmware's
+     * own callback (see its doc comment for why that alone isn't enough).
+     */
+    public void fetchOtaStatus(Consumer<String> callback) {
+        if (callback == null) {
+            return;
+        }
+        Network network = boardNetwork;
+        if (network == null) {
+            callback.accept(null);
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/ota"));
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                post(() -> callback.accept(code < 400 ? response : null));
+            } catch (Exception exception) {
+                post(() -> callback.accept(null));
             }
         });
     }

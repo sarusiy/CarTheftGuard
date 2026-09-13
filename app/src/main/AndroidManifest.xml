@@ -19,6 +19,12 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Lets the About tab's "install APK from Drive" flow launch the system
+         package installer with a downloaded APK, same as installing one from
+         any browser download. Android still shows its own "install unknown
+         apps" per-source confirmation on top of this; this permission alone
+         doesn't bypass that. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="true"
@@ -32,6 +38,19 @@
             android:name=".CanCaptureService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- Exposes the app-private cache dir (where downloaded APKs land)
+             to the system package installer via a content:// URI: installing
+             a file:// URI straight from app-private storage is blocked since
+             Android 7 (StrictMode FileUriExposedException). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
         <activity
             android:name=".MainActivity"
             android:exported="true">

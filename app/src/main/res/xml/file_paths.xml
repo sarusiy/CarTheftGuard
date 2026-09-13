@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Downloaded APKs/firmware land in the app's private cache dir before
+         being handed to the package installer or pushed to the board. -->
+    <cache-path name="downloads" path="." />
+</paths>

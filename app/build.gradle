@@ -32,6 +32,17 @@ def gitShortHash = {
     }
 }
 
+/* Drive API key/folder (used by the About tab's "check Drive for updates"
+ * feature) live only in local.properties -- gitignored, never committed --
+ * same reasoning as sdk.dir above. Falls back to an empty string so a fresh
+ * checkout without those two lines still builds, just with that feature
+ * inert rather than a build failure. */
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { localProperties.load(it) }
+}
+
 android {
     namespace 'com.sarusiy.cartheftguard'
     compileSdk 35
@@ -42,6 +53,12 @@ android {
         targetSdk 35
         versionCode gitCommitCount()
         versionName "0.6.0-" + gitShortHash()
+        buildConfigField "String", "DRIVE_API_KEY", "\"${localProperties.getProperty('driveApiKey', '')}\""
+        buildConfigField "String", "DRIVE_FOLDER_ID", "\"${localProperties.getProperty('driveFolderId', '')}\""
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     compileOptions {
