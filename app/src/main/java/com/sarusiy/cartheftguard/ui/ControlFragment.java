@@ -2,6 +2,8 @@ package com.sarusiy.cartheftguard.ui;
 
 import android.content.Context;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -18,8 +20,17 @@ import androidx.fragment.app.Fragment;
 
 import com.sarusiy.cartheftguard.BoardLink;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 /** "Control" tab: commands sent to the board over the Wi-Fi link established on the Connect tab. */
 public class ControlFragment extends Fragment implements BoardLink.Listener {
+    /** How long to keep polling GET /api/obd/vin after triggering a read before giving up --
+     * the board answers asynchronously from its own OBD loop (see BoardLink.readVin), which
+     * on a bench test took up to ~8s worst case (a full pass through every polled PID timing
+     * out first). 12 * 1s comfortably covers that with margin. */
+    private static final int VIN_POLL_INTERVAL_MS = 1000;
+    private static final int VIN_POLL_MAX_ATTEMPTS = 12;
 
     private BoardLink boardLink;
 
@@ -33,6 +44,25 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
     private TextView partnerText;
     private Button simMode11Button;
     private Button simMode29Button;
+    private TextView vinText;
+    private Button readVinButton;
+    private int vinPollAttempts;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable vinPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isAdded()) {
+                return;
+            }
+            vinPollAttempts++;
+            boardLink.fetchVin();
+            if (vinPollAttempts < VIN_POLL_MAX_ATTEMPTS) {
+                handler.postDelayed(this, VIN_POLL_INTERVAL_MS);
+            } else if (readVinButton != null) {
+                readVinButton.setEnabled(true);
+            }
+        }
+    };
 
     @Override
     public void onAttach(@NonNull Context context) {
@@ -57,6 +87,7 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
 
     @Override
     public void onStop() {
+        handler.removeCallbacks(vinPollRunnable);
         boardLink.removeListener(this);
         super.onStop();
     }
@@ -137,6 +168,17 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
         refreshPartnerButton.setOnClickListener(view -> refreshCanPartner());
         root.addView(refreshPartnerButton, Views.matchHeightTop(context, 44, 8));
 
+        root.addView(Views.label(context, "Vehicle Identification (VIN)", 16, true), Views.matchWrapTop(context, 28));
+        vinText = Views.label(context, "VIN: not read yet", 14, false);
+        root.addView(vinText, Views.matchWrapTop(context, 4));
+        root.addView(Views.label(context, "Mode 09 PID 0x02 -- a one-off read (the VIN never changes), "
+                        + "answered by whichever ECU holds it (often the gateway, not necessarily the "
+                        + "engine ECU). Requires Active CAN mode, same as the rest of this tab.", 12, false),
+                Views.matchWrapTop(context, 4));
+        readVinButton = Views.secondaryButton(context, "Read VIN");
+        readVinButton.setOnClickListener(view -> startVinRead());
+        root.addView(readVinButton, Views.matchHeightTop(context, 44, 8));
+
         root.addView(Views.label(context, "More controls (headlights, horn, lock, etc.) land here as the firmware grows.", 12, false),
                 Views.matchWrapTop(context, 24));
 
@@ -197,6 +239,15 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
         });
     }
 
+    private void startVinRead() {
+        handler.removeCallbacks(vinPollRunnable);
+        vinText.setText("VIN: reading...");
+        readVinButton.setEnabled(false);
+        boardLink.readVin();
+        vinPollAttempts = 0;
+        handler.postDelayed(vinPollRunnable, VIN_POLL_INTERVAL_MS);
+    }
+
     private void updateLinkState() {
         linkText.setText(boardLink.isWifiReady() ? "Wi-Fi link: " + boardLink.getBoardIp() : "Wi-Fi link: not connected");
         frequencyButton.setEnabled(boardLink.isWifiReady());
@@ -223,6 +274,36 @@ public class ControlFragment extends Fragment implements BoardLink.Listener {
     public void onBoardConnectionChanged(boolean connected) {
         if (!connected) {
             updateLinkState();
+        }
+    }
+
+    @Override
+    public void onVinData(String json) {
+        if (vinText == null) {
+            return;
+        }
+        try {
+            JSONObject state = new JSONObject(json);
+            String status = state.optString("status", "none");
+            switch (status) {
+                case "ok":
+                    vinText.setText("VIN: " + state.optString("vin", ""));
+                    break;
+                case "timeout":
+                    vinText.setText("VIN: no response (timeout)");
+                    break;
+                case "error":
+                    vinText.setText("VIN: CAN bus is in Passive mode -- switch to Active first");
+                    break;
+                default:
+                    return; /* "none" -- board hasn't serviced the request yet; keep polling */
+            }
+            handler.removeCallbacks(vinPollRunnable);
+            if (readVinButton != null) {
+                readVinButton.setEnabled(true);
+            }
+        } catch (JSONException exception) {
+            vinText.setText("VIN: malformed response");
         }
     }
 }
