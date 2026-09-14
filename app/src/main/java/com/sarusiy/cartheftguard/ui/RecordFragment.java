@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -22,14 +23,20 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
+import androidx.documentfile.provider.DocumentFile;
 import androidx.fragment.app.Fragment;
 
 import com.sarusiy.cartheftguard.BoardLink;
 import com.sarusiy.cartheftguard.CanCaptureService;
+import com.sarusiy.cartheftguard.DriveUploader;
+import com.sarusiy.cartheftguard.UdsScanLog;
 import com.sarusiy.cartheftguard.UdsTargets;
+import com.sarusiy.cartheftguard.UploadCleanup;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -76,6 +83,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     private static final String PREF_UDS_TARGET_INDEX = "uds_target_index";
     private static final String PREF_UDS_DID_START = "uds_did_start";
     private static final String PREF_UDS_DID_END = "uds_did_end";
+    private static final String PREF_DRIVE_FOLDER_URI = "drive_folder_uri";
 
     private BoardLink boardLink;
     private Button startButton;
@@ -86,6 +94,18 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     private TextView droppedText;
     private TextView fileText;
     private TextView capturesText;
+    private LinearLayout uploadCheckboxColumn;
+    private TextView uploadStatusText;
+    private TextView driveFolderText;
+    private List<File> uploadCandidateFiles = new ArrayList<>();
+    private List<CheckBox> uploadCheckboxes = new ArrayList<>();
+    /** Uri of the Drive folder the user picked via the system document-tree
+     * picker (see chooseDriveFolderLauncher) -- null until they've chosen
+     * one. Persisted so it survives app restarts; the OS grants persistable
+     * read/write permission on it once, at pick time. */
+    private Uri driveFolderUri;
+    private final ActivityResultLauncher<Uri> chooseDriveFolderLauncher =
+            registerForActivityResult(new ActivityResultContracts.OpenDocumentTree(), this::onDriveFolderChosen);
     private LinearLayout carButtonsRow;
     private String selectedCarId;
     private boolean receiverRegistered;
@@ -102,6 +122,13 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     private TextView udsStatusText;
     private static final int UDS_POLL_INTERVAL_MS = 1000;
     private final Handler udsPollHandler = new Handler(Looper.getMainLooper());
+    /** Snapshot of the scan actually sent -- kept separate from
+     * selectedUdsTarget/the DID EditTexts so the eventual log entry
+     * (UdsScanLog) reflects what was really swept even if the user edits
+     * those fields again before the scan finishes. */
+    private UdsTargets.Target activeUdsTarget;
+    private int activeUdsDidStart;
+    private int activeUdsDidEnd;
     private final Runnable udsPollRunnable = new Runnable() {
         @Override
         public void run() {
@@ -109,7 +136,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                 return;
             }
             boardLink.fetchUdsScanStatus(json -> {
-                if (udsStatusText == null) {
+                if (!isAdded() || udsStatusText == null) {
                     return;
                 }
                 if (json == null) {
@@ -129,13 +156,24 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                         udsStatusText.setText(resultCount == 0
                                 ? "UDS scan: done, no DID responded in this range"
                                 : "UDS scan: done, " + resultCount + " DID(s) responded -- see " + json);
+                        logActiveScan(state, currentDid, resultCount);
                     } else if ("error".equals(state)) {
                         udsStatusText.setText("UDS scan: failed (board is in Passive mode?)");
+                        logActiveScan(state, currentDid, resultCount);
                     }
                 } catch (JSONException exception) {
                     udsStatusText.setText("UDS scan: malformed status response");
                 }
             });
+        }
+
+        private void logActiveScan(String state, String currentDid, int resultCount) {
+            if (activeUdsTarget == null || !isAdded()) {
+                return;
+            }
+            UdsScanLog.append(requireContext(), selectedCarId, "record", activeUdsTarget,
+                    activeUdsDidStart, activeUdsDidEnd, state, currentDid, resultCount);
+            activeUdsTarget = null;
         }
     };
 
@@ -200,6 +238,32 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                 ? UdsTargets.ALL[udsTargetIndex] : null;
         persistedUdsDidStart = prefs(context).getInt(PREF_UDS_DID_START, UdsTargets.DEFAULT_DID_START);
         persistedUdsDidEnd = prefs(context).getInt(PREF_UDS_DID_END, UdsTargets.DEFAULT_DID_END);
+        String savedFolderUri = prefs(context).getString(PREF_DRIVE_FOLDER_URI, null);
+        driveFolderUri = savedFolderUri != null ? Uri.parse(savedFolderUri) : null;
+    }
+
+    private void onDriveFolderChosen(Uri uri) {
+        if (uri == null || !isAdded()) {
+            return;
+        }
+        requireContext().getContentResolver().takePersistableUriPermission(uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        driveFolderUri = uri;
+        prefs(requireContext()).edit().putString(PREF_DRIVE_FOLDER_URI, uri.toString()).apply();
+        updateDriveFolderText();
+    }
+
+    private void updateDriveFolderText() {
+        if (driveFolderText == null) {
+            return;
+        }
+        if (driveFolderUri == null) {
+            driveFolderText.setText("No Drive folder chosen yet.");
+            return;
+        }
+        DocumentFile folder = DocumentFile.fromTreeUri(requireContext(), driveFolderUri);
+        String name = folder != null ? folder.getName() : null;
+        driveFolderText.setText("Drive folder: " + (name != null ? name : driveFolderUri));
     }
 
     private SharedPreferences prefs(Context context) {
@@ -330,6 +394,28 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         capturesText.setTextIsSelectable(true);
         root.addView(capturesText, Views.matchWrapTop(context, 8));
 
+        root.addView(Views.label(context, "Upload to Drive", 16, true), Views.matchWrapTop(context, 24));
+        TextView uploadNote = Views.label(context,
+                "Pick a Drive folder once (uses your phone's own Drive app/account via the system file picker), "
+                        + "then select recordings below and copy them there -- no USB/adb needed to get captures "
+                        + "off the phone for analysis.",
+                12, false);
+        uploadNote.setTextColor(0xff52616b);
+        root.addView(uploadNote, Views.matchWrapTop(context, 4));
+        Button chooseDriveFolderButton = Views.secondaryButton(context, "Choose Drive folder");
+        chooseDriveFolderButton.setOnClickListener(view -> chooseDriveFolderLauncher.launch(null));
+        root.addView(chooseDriveFolderButton, Views.matchHeightTop(context, 46, 8));
+        driveFolderText = Views.label(context, "", 12, false);
+        root.addView(driveFolderText, Views.matchWrapTop(context, 4));
+        uploadCheckboxColumn = new LinearLayout(context);
+        uploadCheckboxColumn.setOrientation(LinearLayout.VERTICAL);
+        root.addView(uploadCheckboxColumn, Views.matchWrapTop(context, 12));
+        Button uploadSelectedButton = Views.secondaryButton(context, "Upload selected");
+        uploadSelectedButton.setOnClickListener(view -> uploadSelectedRecordings());
+        root.addView(uploadSelectedButton, Views.matchHeightTop(context, 46, 8));
+        uploadStatusText = Views.label(context, "", 12, false);
+        root.addView(uploadStatusText, Views.matchWrapTop(context, 4));
+
         LinearLayout liveHeader = new LinearLayout(context);
         liveHeader.setOrientation(LinearLayout.HORIZONTAL);
         liveHeader.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -364,6 +450,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         scroll.addView(root);
         updateConnectionState();
         refreshCaptureList();
+        updateDriveFolderText();
         refreshCarButtons();
         return scroll;
     }
@@ -548,11 +635,15 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
             int didStart = parseHexOrDefault(udsDidStartInput, UdsTargets.DEFAULT_DID_START);
             int didEnd = parseHexOrDefault(udsDidEndInput, UdsTargets.DEFAULT_DID_END);
             udsStatusText.setText("UDS scan: starting against " + selectedUdsTarget.label + "...");
+            activeUdsTarget = selectedUdsTarget;
+            activeUdsDidStart = didStart;
+            activeUdsDidEnd = didEnd;
             boardLink.startUdsScan(selectedUdsTarget, didStart, didEnd, started -> {
                 if (started) {
                     udsPollHandler.postDelayed(udsPollRunnable, UDS_POLL_INTERVAL_MS);
                 } else {
                     udsStatusText.setText("UDS scan: failed to start");
+                    activeUdsTarget = null;
                 }
             });
         } else if (selectedUdsTarget != null) {
@@ -617,6 +708,78 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                     .append('\n');
         }
         capturesText.setText(summary.toString().trim());
+        refreshUploadList();
+    }
+
+    /** Keeps the upload checkbox column's file order in sync with
+     * capturesText -- checkbox index N corresponds to uploadCandidateFiles
+     * index N, since both are built from the same sorted listAllCaptureFiles(). */
+    private void refreshUploadList() {
+        if (uploadCheckboxColumn == null) {
+            return;
+        }
+        Context context = requireContext();
+        uploadCheckboxColumn.removeAllViews();
+        uploadCheckboxes = new ArrayList<>();
+        uploadCandidateFiles = listAllCaptureFiles();
+        uploadCandidateFiles.sort((left, right) -> Long.compare(right.lastModified(), left.lastModified()));
+        int count = Math.min(uploadCandidateFiles.size(), 10);
+        if (count == 0) {
+            uploadCheckboxColumn.addView(Views.label(context, "No recordings yet.", 12, false),
+                    Views.matchWrapTop(context, 0));
+            return;
+        }
+        for (int index = 0; index < count; index++) {
+            File file = uploadCandidateFiles.get(index);
+            File parent = file.getParentFile();
+            boolean nested = parent != null && !parent.getName().equals("can-captures");
+            String label = (nested ? parent.getName() + "/" + file.getName() : file.getName())
+                    + "  (" + (file.length() / 1024) + " KB)";
+            CheckBox checkBox = new CheckBox(context);
+            checkBox.setText(label);
+            checkBox.setTextColor(0xff1f2933);
+            uploadCheckboxColumn.addView(checkBox, Views.matchWrapTop(context, index == 0 ? 0 : 4));
+            uploadCheckboxes.add(checkBox);
+        }
+    }
+
+    private void uploadSelectedRecordings() {
+        if (driveFolderUri == null) {
+            uploadStatusText.setText("Choose a Drive folder first (button above).");
+            return;
+        }
+        List<File> selected = new ArrayList<>();
+        for (int index = 0; index < uploadCheckboxes.size(); index++) {
+            if (uploadCheckboxes.get(index).isChecked()) {
+                selected.add(uploadCandidateFiles.get(index));
+            }
+        }
+        if (selected.isEmpty()) {
+            uploadStatusText.setText("Select at least one recording first.");
+            return;
+        }
+        uploadNext(selected, 0, 0);
+    }
+
+    /** Uploads one file at a time (rather than in parallel) so the status
+     * text can show clean progress and the relay isn't hit with a burst of
+     * simultaneous requests. */
+    private void uploadNext(List<File> files, int index, int succeeded) {
+        if (index >= files.size()) {
+            uploadStatusText.setText("Uploaded " + succeeded + "/" + files.size() + " recording(s) to Drive.");
+            return;
+        }
+        uploadStatusText.setText("Uploading " + (index + 1) + "/" + files.size() + ": " + files.get(index).getName());
+        File file = files.get(index);
+        DriveUploader.upload(requireContext(), driveFolderUri, file, success -> {
+            if (!isAdded()) {
+                return;
+            }
+            if (success) {
+                UploadCleanup.markUploaded(requireContext(), file.getName());
+            }
+            uploadNext(files, index + 1, succeeded + (success ? 1 : 0));
+        });
     }
 
     private void confirmClearAllRecordings() {

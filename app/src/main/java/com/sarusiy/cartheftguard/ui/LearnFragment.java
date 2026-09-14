@@ -26,6 +26,7 @@ import androidx.fragment.app.Fragment;
 
 import com.sarusiy.cartheftguard.BoardLink;
 import com.sarusiy.cartheftguard.CanCaptureService;
+import com.sarusiy.cartheftguard.UdsScanLog;
 import com.sarusiy.cartheftguard.UdsTargets;
 
 import org.json.JSONException;
@@ -198,6 +199,14 @@ public final class LearnFragment extends Fragment {
 
     private static final int UDS_POLL_INTERVAL_MS = 1000;
     private final Handler udsPollHandler = new Handler(Looper.getMainLooper());
+    /** Which scan is currently in flight -- set right before boardLink.startUdsScan()
+     * is called, read back when the poll loop below sees it finish, so the log
+     * entry (UdsScanLog) records the actual step/target/range even if the user
+     * has since navigated to a different step. */
+    private String activeUdsStepId;
+    private UdsTargets.Target activeUdsTarget;
+    private int activeUdsDidStart;
+    private int activeUdsDidEnd;
     private final Runnable udsPollRunnable = new Runnable() {
         @Override
         public void run() {
@@ -205,7 +214,7 @@ public final class LearnFragment extends Fragment {
                 return;
             }
             boardLink.fetchUdsScanStatus(json -> {
-                if (udsStatusText == null) {
+                if (!isAdded() || udsStatusText == null) {
                     return;
                 }
                 if (json == null) {
@@ -225,13 +234,24 @@ public final class LearnFragment extends Fragment {
                         udsStatusText.setText(resultCount == 0
                                 ? "UDS scan: done, no DID responded in this range"
                                 : "UDS scan: done, " + resultCount + " DID(s) responded -- see " + json);
+                        logActiveScan(state, currentDid, resultCount);
                     } else if ("error".equals(state)) {
                         udsStatusText.setText("UDS scan: failed (board is in Passive mode?)");
+                        logActiveScan(state, currentDid, resultCount);
                     }
                 } catch (JSONException exception) {
                     udsStatusText.setText("UDS scan: malformed status response");
                 }
             });
+        }
+
+        private void logActiveScan(String state, String currentDid, int resultCount) {
+            if (activeUdsTarget == null || !isAdded()) {
+                return;
+            }
+            UdsScanLog.append(requireContext(), selectedCarId, activeUdsStepId, activeUdsTarget,
+                    activeUdsDidStart, activeUdsDidEnd, state, currentDid, resultCount);
+            activeUdsTarget = null;
         }
     };
 
@@ -569,11 +589,16 @@ public final class LearnFragment extends Fragment {
         udsPollHandler.removeCallbacksAndMessages(null);
         if (target != null && !passiveCheckBox.isChecked()) {
             udsStatusText.setText("UDS scan: starting against " + target.label + "...");
+            activeUdsStepId = step.id;
+            activeUdsTarget = target;
+            activeUdsDidStart = UdsTargets.DEFAULT_DID_START;
+            activeUdsDidEnd = UdsTargets.DEFAULT_DID_END;
             boardLink.startUdsScan(target, UdsTargets.DEFAULT_DID_START, UdsTargets.DEFAULT_DID_END, started -> {
                 if (started) {
                     udsPollHandler.postDelayed(udsPollRunnable, UDS_POLL_INTERVAL_MS);
                 } else {
                     udsStatusText.setText("UDS scan: failed to start");
+                    activeUdsTarget = null;
                 }
             });
         } else if (target != null) {

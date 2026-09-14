@@ -54,6 +54,13 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        if (savedInstanceState == null) {
+            /* Only on a genuine fresh launch, not a configuration-change
+             * recreation -- deletes capture files already confirmed
+             * uploaded to Drive, leaves anything not yet backed up alone. */
+            UploadCleanup.deleteUploadedOnLaunch(this);
+        }
+
         FrameLayout fragmentContainer = new FrameLayout(this);
         fragmentContainer.setId(FRAGMENT_CONTAINER_ID);
 
