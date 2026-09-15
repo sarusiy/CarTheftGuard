@@ -57,9 +57,14 @@ public final class UdsScanLog {
      * {@code currentDidHex} is the status JSON's current_did field
      * (e.g. "0x0200"). Completion is current_did having reached did_end --
      * if the sweep stopped early (crash, disconnect, bug), current_did will
-     * be short of did_end and this records that plainly. */
+     * be short of did_end and this records that plainly. {@code session} is
+     * the status JSON's session field ("positive"/"negative"/"timeout"/
+     * "none") -- the outcome of the one-shot Diagnostic Session Control
+     * (0x10 0x03) request the firmware now sends before a sweep starts, see
+     * UDS_BODY_MODULE_RESEARCH.md's 2026-09-15 update. */
     public static void append(Context context, String carId, String stepLabel, UdsTargets.Target target,
-                               int didStart, int didEnd, String state, String currentDidHex, int resultCount) {
+                               int didStart, int didEnd, String state, String currentDidHex, int resultCount,
+                               String session) {
         synchronized (LOCK) {
             try {
                 File dir = new File(context.getExternalFilesDir(null), "can-captures");
@@ -75,13 +80,13 @@ public final class UdsScanLog {
                 try (FileWriter writer = new FileWriter(file, true)) {
                     if (writeHeader) {
                         writer.write("timestamp,car,step,target,req_id,resp_id,did_start,did_end,"
-                                + "final_current_did,result_count,state,completed\n");
+                                + "final_current_did,result_count,state,completed,session\n");
                     }
                     writer.write(String.format(Locale.US,
-                            "%s,%s,%s,%s,0x%03X,0x%03X,0x%04X,0x%04X,0x%04X,%d,%s,%b\n",
+                            "%s,%s,%s,%s,0x%03X,0x%03X,0x%04X,0x%04X,0x%04X,%d,%s,%b,%s\n",
                             timestamp, csvSafe(carId), csvSafe(stepLabel), csvSafe(target.label),
                             target.requestId, target.responseId, didStart, didEnd, currentDid,
-                            resultCount, state, completed));
+                            resultCount, state, completed, csvSafe(session)));
                 }
             } catch (IOException exception) {
                 Log.w(TAG, "append failed", exception);

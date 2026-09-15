@@ -148,18 +148,20 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                     String state = status.optString("state", "idle");
                     int resultCount = status.optInt("result_count", 0);
                     String currentDid = status.optString("current_did", "");
+                    String session = status.optString("session", "none");
                     if ("running".equals(state)) {
-                        udsStatusText.setText("UDS scan: running (probing " + currentDid + ", "
-                                + resultCount + " hit(s) so far) -- keep recording until this finishes");
+                        udsStatusText.setText("UDS scan: running (session " + session + ", probing " + currentDid
+                                + ", " + resultCount + " hit(s) so far) -- keep recording until this finishes");
                         udsPollHandler.postDelayed(this, UDS_POLL_INTERVAL_MS);
                     } else if ("done".equals(state)) {
-                        udsStatusText.setText(resultCount == 0
+                        udsStatusText.setText((resultCount == 0
                                 ? "UDS scan: done, no DID responded in this range"
-                                : "UDS scan: done, " + resultCount + " DID(s) responded -- see " + json);
-                        logActiveScan(state, currentDid, resultCount);
+                                : "UDS scan: done, " + resultCount + " DID(s) responded -- see " + json)
+                                + " (session: " + session + ")");
+                        logActiveScan(state, currentDid, resultCount, session);
                     } else if ("error".equals(state)) {
                         udsStatusText.setText("UDS scan: failed (board is in Passive mode?)");
-                        logActiveScan(state, currentDid, resultCount);
+                        logActiveScan(state, currentDid, resultCount, session);
                     }
                 } catch (JSONException exception) {
                     udsStatusText.setText("UDS scan: malformed status response");
@@ -167,12 +169,12 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
             });
         }
 
-        private void logActiveScan(String state, String currentDid, int resultCount) {
+        private void logActiveScan(String state, String currentDid, int resultCount, String session) {
             if (activeUdsTarget == null || !isAdded()) {
                 return;
             }
             UdsScanLog.append(requireContext(), selectedCarId, "record", activeUdsTarget,
-                    activeUdsDidStart, activeUdsDidEnd, state, currentDid, resultCount);
+                    activeUdsDidStart, activeUdsDidEnd, state, currentDid, resultCount, session);
             activeUdsTarget = null;
         }
     };
