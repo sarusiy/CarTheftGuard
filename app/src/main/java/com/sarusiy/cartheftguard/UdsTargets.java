@@ -32,10 +32,20 @@ public final class UdsTargets {
     public static final Target DOOR_REAR_PASSENGER = new Target("Rear Passenger Door", 0x73F, 0x7A9);
     public static final Target HEADLIGHT_REGULATION = new Target("Headlight Regulation", 0x754, 0x7BE);
     public static final Target HIGH_BEAM_ASSIST = new Target("High Beam Assist", 0x730, 0x79A);
+    /** Not a body/comfort module -- a sanity-check target. Six body-module
+     * candidates all timed out (2026-09-15 real-car test, see
+     * UDS_BODY_MODULE_RESEARCH.md); the Gateway is the one node already
+     * known to answer something on this OBD-II connection (implicit in the
+     * working Mode 01 traffic), so it tells us whether that's a
+     * transport/framing issue on our side or genuinely unreachable body
+     * modules. Appended at the end of ALL, not inserted, so it doesn't
+     * shift any already-persisted RecordFragment target-index selection. */
+    public static final Target GATEWAY = new Target("Gateway (sanity check, not a body module)", 0x710, 0x77A);
 
     public static final Target[] ALL = {
             CENTRAL_CONVENIENCE, LOCK_ELECTRONICS, DOOR_DRIVER, DOOR_PASSENGER,
             DOOR_REAR_DRIVER, DOOR_REAR_PASSENGER, HEADLIGHT_REGULATION, HIGH_BEAM_ASSIST,
+            GATEWAY,
     };
 
     /** Default DID sweep range -- modest, per UDS_BODY_MODULE_RESEARCH.md's
