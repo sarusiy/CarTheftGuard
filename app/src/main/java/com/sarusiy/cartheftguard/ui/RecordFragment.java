@@ -928,7 +928,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                 return;
             }
             if (success) {
-                UploadCleanup.markUploaded(requireContext(), file.getName());
+                UploadCleanup.markUploaded(requireContext(), file.getName(), driveFolderUri);
             }
             uploadNext(files, index + 1, succeeded + (success ? 1 : 0));
         });

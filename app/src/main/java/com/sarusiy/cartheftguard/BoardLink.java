@@ -183,13 +183,6 @@ public final class BoardLink {
         return boardNetwork != null;
     }
 
-    public void forcePassiveCanMode() {
-        if (!isWifiReady()) {
-            return;
-        }
-        networkExecutor.execute(() -> ensurePassiveModeIfNeeded(boardNetwork));
-    }
-
     public void fetchCanMode(Consumer<String> callback) {
         if (callback == null) {
             return;
@@ -221,11 +214,14 @@ public final class BoardLink {
     }
 
     /**
-     * Explicitly requests a CAN mode change ("active" or "passive") from the UI.
-     * Unlike {@link #ensurePassiveModeIfNeeded}, this is a direct user action and
-     * is allowed to switch the board to active mode -- the board still defaults to
-     * passive on every boot and Wi-Fi reconnect, so this never changes that safe
-     * default, only the current live session.
+     * Explicitly requests a CAN mode change ("active" or "passive") from the
+     * UI -- the only thing that changes the board's live CAN mode now.
+     * There used to also be an automatic on-reconnect correction back to
+     * Passive (removed 2026-09-15): it silently undid both the firmware's
+     * Active boot default and any manual Active selection on every Wi-Fi
+     * reconnect, which is exactly backwards given Passive's own CAN-ACK-
+     * starvation distortion (see FABIA_ANALYSIS.md) -- Active is the
+     * correct default now, not something to defend against.
      */
     public void setCanMode(String mode, Consumer<Boolean> callback) {
         Network network = boardNetwork;
@@ -356,55 +352,6 @@ public final class BoardLink {
         });
     }
 
-    private void ensurePassiveModeIfNeeded(Network network) {
-        try {
-            HttpURLConnection statusConnection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/can"));
-            statusConnection.setRequestMethod("GET");
-            statusConnection.setConnectTimeout(3000);
-            statusConnection.setReadTimeout(3000);
-            int code = statusConnection.getResponseCode();
-            String response = readResponse(code >= 400 ? statusConnection.getErrorStream() : statusConnection.getInputStream());
-            statusConnection.disconnect();
-            if (code >= 400) {
-                emitLog("Board status check failed during passive sync: HTTP " + code + " -> " + response);
-                return;
-            }
-            JSONObject canState = new JSONObject(response);
-            if (canState.optBoolean("passive", true)) {
-                emitLog("Board already passive on Wi-Fi connect; no mode change required.");
-                return;
-            }
-        } catch (Exception ignored) {
-            emitLog("Board status check timed out during passive sync; skipping active-to-passive correction.");
-            return;
-        }
-
-        try {
-            byte[] body = "passive".getBytes(StandardCharsets.UTF_8);
-            HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/can/mode"));
-            connection.setRequestMethod("POST");
-            connection.setConnectTimeout(5000);
-            connection.setReadTimeout(5000);
-            connection.setDoOutput(true);
-            connection.setUseCaches(false);
-            connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
-            connection.setFixedLengthStreamingMode(body.length);
-            try (java.io.OutputStream output = connection.getOutputStream()) {
-                output.write(body);
-            }
-            int code = connection.getResponseCode();
-            String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
-            connection.disconnect();
-            if (code >= 400) {
-                emitLog("CAN mode set failed: HTTP " + code + " -> " + response);
-                return;
-            }
-            emitLog("CAN mode corrected to passive: " + response);
-        } catch (Exception exception) {
-            emitLog("Passive mode correction failed: " + exception.getMessage());
-        }
-    }
-
     public String getBoardIp() {
         return isWifiReady() ? AP_IP : null;
     }
@@ -528,14 +475,6 @@ public final class BoardLink {
                 mainHandler.removeCallbacks(connectTimeoutRunnable);
                 boardNetwork = network;
                 emitLog("Joined board Wi-Fi: " + AP_SSID);
-                networkExecutor.execute(() -> {
-                    try {
-                        Thread.sleep(500);
-                    } catch (InterruptedException ignored) {
-                        Thread.currentThread().interrupt();
-                    }
-                    ensurePassiveModeIfNeeded(network);
-                });
                 post(() -> {
                     for (Listener listener : listeners) {
                         listener.onWifiConnected(AP_IP);

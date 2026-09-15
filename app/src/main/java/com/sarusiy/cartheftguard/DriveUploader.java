@@ -72,6 +72,24 @@ public final class DriveUploader {
                         output.write(buffer, 0, read);
                     }
                 }
+                /* Verify rather than trust a clean write -- a real incident
+                 * (2026-09-15) showed the SAF write completing with no
+                 * exception while the file never actually existed afterward
+                 * (empty in both the Drive app's own UI and a fresh re-check
+                 * minutes later), most likely because the local write
+                 * succeeded against the provider's cache while it had no
+                 * real path to Google's servers at the time. Re-querying the
+                 * directory for a same-sized match won't catch every case
+                 * (it's still asking the same local provider, not Google's
+                 * servers directly), but it does catch a silently-empty or
+                 * truncated result instead of reporting success blind. */
+                DocumentFile verify = folder.findFile(file.getName());
+                if (verify == null || verify.length() != file.length()) {
+                    Log.w(TAG, "upload(" + file.getName() + ") verification failed -- provider reports "
+                            + (verify == null ? "missing" : ("length " + verify.length() + ", expected " + file.length())));
+                    MAIN.post(() -> callback.accept(false));
+                    return;
+                }
                 success = true;
                 Log.i(TAG, "upload(" + file.getName() + ") -> copied to " + folderUri);
             } catch (Exception exception) {
