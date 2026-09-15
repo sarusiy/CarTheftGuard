@@ -34,6 +34,7 @@ import androidx.fragment.app.Fragment;
 import com.sarusiy.cartheftguard.BoardLink;
 import com.sarusiy.cartheftguard.CanCaptureService;
 import com.sarusiy.cartheftguard.DriveUploader;
+import com.sarusiy.cartheftguard.UdsAddrScanLog;
 import com.sarusiy.cartheftguard.UdsScanLog;
 import com.sarusiy.cartheftguard.UdsTargets;
 import com.sarusiy.cartheftguard.UploadCleanup;
@@ -178,6 +179,103 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
             activeUdsTarget = null;
         }
     };
+
+    /** Address-discovery sweep -- separate from the DID-sweep controls
+     * above: probes candidate request IDs directly (see
+     * BoardLink.startUdsAddrScan) instead of assuming a specific module
+     * address, since the 2026-09-15 real-car test found the Gateway
+     * answers (session:positive) while every guessed body-module address
+     * timed out -- the mechanism works, the guessed addresses are the
+     * likely problem. Fixed response offset of 0x6A matches every
+     * candidate address pair researched so far. */
+    private EditText addrScanStartInput;
+    private EditText addrScanEndInput;
+    private TextView addrScanStatusText;
+    private static final int ADDR_SCAN_RESPONSE_OFFSET = 0x6A;
+    private int activeAddrScanStart;
+    private int activeAddrScanEnd;
+    private boolean addrScanActive;
+    private final Runnable addrScanPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isAdded()) {
+                return;
+            }
+            boardLink.fetchUdsAddrScanStatus(json -> {
+                if (!isAdded() || addrScanStatusText == null) {
+                    return;
+                }
+                if (json == null) {
+                    addrScanStatusText.setText("Address scan: status unavailable");
+                    return;
+                }
+                try {
+                    JSONObject status = new JSONObject(json);
+                    String state = status.optString("state", "idle");
+                    int resultCount = status.optInt("result_count", 0);
+                    String currentReq = status.optString("current_req", "");
+                    if ("running".equals(state)) {
+                        addrScanStatusText.setText("Address scan: running (probing " + currentReq + ", "
+                                + resultCount + " hit(s) so far)");
+                        udsPollHandler.postDelayed(this, UDS_POLL_INTERVAL_MS);
+                    } else if ("done".equals(state) || "error".equals(state)) {
+                        StringBuilder hits = new StringBuilder();
+                        JSONArray results = status.optJSONArray("results");
+                        if (results != null) {
+                            for (int i = 0; i < results.length(); i++) {
+                                JSONObject hit = results.optJSONObject(i);
+                                if (hit == null) {
+                                    continue;
+                                }
+                                if (hits.length() > 0) {
+                                    hits.append("; ");
+                                }
+                                hits.append(hit.optString("req", "?")).append(" (")
+                                        .append(hit.optString("session", "?")).append(")");
+                            }
+                        }
+                        addrScanStatusText.setText("error".equals(state)
+                                ? "Address scan: failed (board is in Passive mode?)"
+                                : (resultCount == 0
+                                        ? "Address scan: done, no address responded in this range"
+                                        : "Address scan: done, " + resultCount + " address(es) responded -- "
+                                                + hits));
+                        if (addrScanActive) {
+                            UdsAddrScanLog.append(requireContext(), selectedCarId, activeAddrScanStart,
+                                    activeAddrScanEnd, ADDR_SCAN_RESPONSE_OFFSET, state, currentReq,
+                                    resultCount, hits.toString());
+                            addrScanActive = false;
+                        }
+                    }
+                } catch (JSONException exception) {
+                    addrScanStatusText.setText("Address scan: malformed status response");
+                }
+            });
+        }
+    };
+
+    private void startAddrScan() {
+        int start = parseHexOrDefault(addrScanStartInput, 0x700);
+        int end = parseHexOrDefault(addrScanEndInput, 0x7FF);
+        if (end < start) {
+            addrScanStatusText.setText("Range end must be >= start.");
+            return;
+        }
+        activeAddrScanStart = start;
+        activeAddrScanEnd = end;
+        addrScanActive = true;
+        addrScanStatusText.setText("Address scan: starting 0x" + Integer.toHexString(start)
+                + "-0x" + Integer.toHexString(end) + "...");
+        udsPollHandler.removeCallbacksAndMessages(null);
+        boardLink.startUdsAddrScan(start, end, ADDR_SCAN_RESPONSE_OFFSET, started -> {
+            if (started) {
+                udsPollHandler.postDelayed(addrScanPollRunnable, UDS_POLL_INTERVAL_MS);
+            } else {
+                addrScanStatusText.setText("Address scan: failed to start");
+                addrScanActive = false;
+            }
+        });
+    }
 
     /** Live raw-frame tail: independent of CanCaptureService/CSV recording --
      * both just poll the same GET /api/can, so you can watch live without
@@ -354,6 +452,33 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         udsStatusText.setTextColor(0xff0b6e69);
         root.addView(udsStatusText, Views.matchWrapTop(context, 4));
         updateUdsEstimate();
+
+        root.addView(Views.label(context, "UDS address discovery (find real module addresses)", 16, true),
+                Views.matchWrapTop(context, 20));
+        root.addView(Views.label(context,
+                        "Don't know the right address for a module? Probe a range of request IDs directly -- "
+                                + "each one gets a quick session-control check (response = request + 0x6A). "
+                                + "Independent of the target buttons/DID range above; runs on its own, not tied "
+                                + "to Start recording.",
+                        12, false),
+                Views.matchWrapTop(context, 4));
+        LinearLayout addrScanRow = new LinearLayout(context);
+        addrScanRow.setOrientation(LinearLayout.HORIZONTAL);
+        addrScanStartInput = Views.input(context, "Start (hex)", android.text.InputType.TYPE_CLASS_TEXT);
+        addrScanStartInput.setText("700");
+        addrScanRow.addView(addrScanStartInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        addrScanEndInput = Views.input(context, "End (hex)", android.text.InputType.TYPE_CLASS_TEXT);
+        addrScanEndInput.setText("7FF");
+        LinearLayout.LayoutParams addrEndParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        addrEndParams.leftMargin = Views.dp(context, 8);
+        addrScanRow.addView(addrScanEndInput, addrEndParams);
+        root.addView(addrScanRow, Views.matchWrapTop(context, 8));
+        Button addrScanButton = Views.secondaryButton(context, "Start address scan");
+        addrScanButton.setOnClickListener(view -> startAddrScan());
+        root.addView(addrScanButton, Views.matchHeightTop(context, 46, 8));
+        addrScanStatusText = Views.label(context, "", 12, false);
+        addrScanStatusText.setTextColor(0xff0b6e69);
+        root.addView(addrScanStatusText, Views.matchWrapTop(context, 4));
 
         startButton = Views.primaryButton(context, "Start recording");
         startButton.setOnClickListener(view -> startRecording());

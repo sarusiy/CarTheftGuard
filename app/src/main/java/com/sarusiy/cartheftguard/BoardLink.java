@@ -1011,6 +1011,80 @@ public final class BoardLink {
     }
 
     /**
+     * Starts a UDS address-discovery sweep -- probes each candidate request
+     * ID in range with a Diagnostic Session Control request (response =
+     * request + {@code offset}) to find which addresses actually have a
+     * module listening, rather than guessing specific module addresses --
+     * see JC-ESP32P4-M3's UDS_BODY_MODULE_RESEARCH.md 2026-09-15 update.
+     * Fires and returns; poll {@link #fetchUdsAddrScanStatus} for progress.
+     */
+    public void startUdsAddrScan(int reqStart, int reqEnd, int offset, Consumer<Boolean> callback) {
+        Network network = boardNetwork;
+        if (network == null) {
+            emitStatus("Connect to the board first", COLOR_ERROR);
+            if (callback != null) {
+                post(() -> callback.accept(false));
+            }
+            return;
+        }
+        networkExecutor.execute(() -> {
+            boolean success = false;
+            try {
+                byte[] body = String.format(Locale.US, "%X,%X,%X,0",
+                        reqStart, reqEnd, offset).getBytes(StandardCharsets.UTF_8);
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/uds/addrscan"));
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setDoOutput(true);
+                connection.setUseCaches(false);
+                connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+                connection.setFixedLengthStreamingMode(body.length);
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    output.write(body);
+                }
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                emitLog("UDS address scan: HTTP " + code + " -> " + response);
+                success = code < 400;
+            } catch (Exception exception) {
+                emitLog("UDS address scan request failed: " + exception.getMessage());
+            }
+            boolean finalSuccess = success;
+            if (callback != null) {
+                post(() -> callback.accept(finalSuccess));
+            }
+        });
+    }
+
+    /** Current UDS address scan progress/results as raw JSON (state, current_req, result_count, results[]). */
+    public void fetchUdsAddrScanStatus(Consumer<String> callback) {
+        if (callback == null) {
+            return;
+        }
+        Network network = boardNetwork;
+        if (network == null) {
+            callback.accept(null);
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/uds/addrscan"));
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                post(() -> callback.accept(code < 400 ? response : null));
+            } catch (Exception exception) {
+                post(() -> callback.accept(null));
+            }
+        });
+    }
+
+    /**
      * Raw CAN frames since {@code after} (0 for "from the start of the ring
      * buffer"), independent of whether CanCaptureService is also recording to
      * a CSV file -- both are just separate consumers of the same
