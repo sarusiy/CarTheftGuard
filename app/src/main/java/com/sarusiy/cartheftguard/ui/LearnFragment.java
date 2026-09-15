@@ -240,6 +240,15 @@ public final class LearnFragment extends Fragment {
                     } else if ("error".equals(state)) {
                         udsStatusText.setText("UDS scan: failed (board is in Passive mode?)");
                         logActiveScan(state, currentDid, resultCount, session);
+                    } else if (activeUdsTarget != null) {
+                        /* Unmatched state (firmware default "idle") while we
+                         * were still expecting running/done/error means the
+                         * board rebooted (e.g. a brownout, see 2026-09-15
+                         * debugging) and silently lost the scan -- report
+                         * that instead of freezing on stale "running" text. */
+                        udsStatusText.setText("UDS scan: board appears to have reset "
+                                + "(lost scan progress) -- check its connection and try again.");
+                        activeUdsTarget = null;
                     }
                 } catch (JSONException exception) {
                     udsStatusText.setText("UDS scan: malformed status response");

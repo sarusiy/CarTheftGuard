@@ -62,22 +62,43 @@ public final class DriveUpdates {
         }
     }
 
+    /** {@code file} is null unless a match was found; {@code error} is null
+     * on a clean lookup (whether or not it matched) and non-null when the
+     * lookup itself couldn't complete -- e.g. no network route to Drive
+     * (very possible at the car, where the phone may have weak/no cellular
+     * signal while connected to the board's own no-internet Wi-Fi AP), a
+     * Drive API error, or missing build config. Callers should show
+     * {@code error} distinctly from "nothing found here" -- a caller
+     * conflating the two previously showed "No firmware/app found in the
+     * Drive folder" for what was actually a network failure, with the file
+     * sitting right there in Drive the whole time. */
+    public static final class LookupResult {
+        public final DriveFile file;
+        public final String error;
+
+        LookupResult(DriveFile file, String error) {
+            this.file = file;
+            this.error = error;
+        }
+    }
+
     /**
      * Finds the most-recently-modified file in the configured Drive folder
      * whose name ends with {@code suffix} (case-insensitive, e.g. ".bin" or
-     * ".apk"). Calls back with null on any failure (network error, no API
-     * key configured, no matching file) -- callers should treat null as
-     * "nothing found", not distinguish the reason.
+     * ".apk"). See {@link LookupResult} for how to tell "not found" apart
+     * from "couldn't check."
      */
-    public static void findLatest(String suffix, Consumer<DriveFile> callback) {
+    public static void findLatest(String suffix, Consumer<LookupResult> callback) {
         if (callback == null) {
             return;
         }
         EXECUTOR.execute(() -> {
             DriveFile result = null;
+            String error = null;
             try {
                 if (BuildConfig.DRIVE_API_KEY.isEmpty() || BuildConfig.DRIVE_FOLDER_ID.isEmpty()) {
-                    MAIN.post(() -> callback.accept(null));
+                    error = "Drive check not configured (missing API key)";
+                    MAIN.post(() -> callback.accept(new LookupResult(null, "Drive check not configured (missing API key)")));
                     return;
                 }
                 String query = "'" + BuildConfig.DRIVE_FOLDER_ID + "' in parents and trashed = false";
@@ -110,24 +131,32 @@ public final class DriveUpdates {
                     Log.i(TAG, "findLatest(\"" + suffix + "\") -> HTTP " + code + ", " +
                             (files != null ? files.length() : 0) + " file(s) in folder, match=" + (result != null));
                 } else {
+                    error = "Drive returned HTTP " + code;
                     Log.w(TAG, "findLatest(\"" + suffix + "\") -> HTTP " + code + ": " + response);
                 }
+            } catch (java.net.UnknownHostException | java.net.SocketTimeoutException | java.net.ConnectException exception) {
+                error = "No internet connection (check mobile data/Wi-Fi, not just the board's own network)";
+                Log.w(TAG, "findLatest(\"" + suffix + "\") failed -- likely no internet route", exception);
             } catch (Exception exception) {
+                error = "Network error: " + exception.getMessage();
                 Log.w(TAG, "findLatest(\"" + suffix + "\") failed", exception);
-                result = null;
             }
             DriveFile finalResult = result;
-            MAIN.post(() -> callback.accept(finalResult));
+            String finalError = error;
+            MAIN.post(() -> callback.accept(new LookupResult(finalResult, finalError)));
         });
     }
 
-    /** Downloads a Drive file's raw bytes to {@code destFile}, overwriting it if present. */
-    public static void download(String fileId, File destFile, Consumer<Boolean> callback) {
+    /** Downloads a Drive file's raw bytes to {@code destFile}, overwriting
+     * it if present. {@code callback} gets null on success, or an error
+     * message on failure (see {@link LookupResult} for the same
+     * network-vs-other-failure reasoning). */
+    public static void download(String fileId, File destFile, Consumer<String> callback) {
         if (callback == null) {
             return;
         }
         EXECUTOR.execute(() -> {
-            boolean success = false;
+            String error = null;
             try {
                 String url = "https://www.googleapis.com/drive/v3/files/" + fileId
                         + "?alt=media&key=" + BuildConfig.DRIVE_API_KEY;
@@ -145,14 +174,47 @@ public final class DriveUpdates {
                             output.write(buffer, 0, read);
                         }
                     }
-                    success = true;
+                } else {
+                    error = "Drive returned HTTP " + code;
+                }
+                connection.disconnect();
+            } catch (java.net.UnknownHostException | java.net.SocketTimeoutException | java.net.ConnectException exception) {
+                error = "No internet connection (check mobile data/Wi-Fi, not just the board's own network)";
+            } catch (Exception exception) {
+                error = "Download failed: " + exception.getMessage();
+            }
+            String finalError = error;
+            MAIN.post(() -> callback.accept(finalError));
+        });
+    }
+
+    /** Downloads a small text file's content directly (no disk write) --
+     * used for the version-string companion files publish-*-to-drive.ps1
+     * upload alongside each .bin/.apk, so the About screen can show what
+     * version a pending update actually is before you commit to it. */
+    public static void downloadText(String fileId, Consumer<String> callback) {
+        if (callback == null) {
+            return;
+        }
+        EXECUTOR.execute(() -> {
+            String result = null;
+            try {
+                String url = "https://www.googleapis.com/drive/v3/files/" + fileId
+                        + "?alt=media&key=" + BuildConfig.DRIVE_API_KEY;
+                HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(8000);
+                connection.setReadTimeout(8000);
+                int code = connection.getResponseCode();
+                if (code < 400) {
+                    result = readAll(connection.getInputStream()).trim();
                 }
                 connection.disconnect();
             } catch (Exception exception) {
-                success = false;
+                result = null;
             }
-            boolean finalSuccess = success;
-            MAIN.post(() -> callback.accept(finalSuccess));
+            String finalResult = result;
+            MAIN.post(() -> callback.accept(finalResult));
         });
     }
 

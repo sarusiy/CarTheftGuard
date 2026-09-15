@@ -163,6 +163,15 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                     } else if ("error".equals(state)) {
                         udsStatusText.setText("UDS scan: failed (board is in Passive mode?)");
                         logActiveScan(state, currentDid, resultCount, session);
+                    } else if (activeUdsTarget != null) {
+                        /* Same reset-detection reasoning as addrScanPollRunnable
+                         * below -- an unmatched state (firmware default "idle")
+                         * while we were still expecting running/done/error means
+                         * the board rebooted (e.g. a brownout) and silently lost
+                         * the scan, instead of the UI freezing on stale text. */
+                        udsStatusText.setText("UDS scan: board appears to have reset "
+                                + "(lost scan progress) -- check its connection and try again.");
+                        activeUdsTarget = null;
                     }
                 } catch (JSONException exception) {
                     udsStatusText.setText("UDS scan: malformed status response");
@@ -246,6 +255,20 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                                     resultCount, hits.toString());
                             addrScanActive = false;
                         }
+                    } else if (addrScanActive) {
+                        /* Any other state (the firmware's own default is
+                         * "idle") while we were still expecting "running" or
+                         * a terminal state means the board's in-memory scan
+                         * state got wiped without us seeing a done/error --
+                         * the one thing that does that is a reboot (e.g. the
+                         * brownout resets found 2026-09-15 debugging this
+                         * exact symptom: a reset silently returns the board
+                         * to idle, and without this branch the UI just froze
+                         * forever on the last "running" text instead of
+                         * reporting what actually happened). */
+                        addrScanStatusText.setText("Address scan: board appears to have reset "
+                                + "(lost scan progress) -- check its connection and try again.");
+                        addrScanActive = false;
                     }
                 } catch (JSONException exception) {
                     addrScanStatusText.setText("Address scan: malformed status response");
@@ -398,10 +421,12 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         passiveCheckBox = new CheckBox(context);
         passiveCheckBox.setText("Passive listen-only (real vehicle)");
         passiveCheckBox.setTextColor(0xff1f2933);
-        passiveCheckBox.setChecked(true);
+        passiveCheckBox.setChecked(false);
         root.addView(passiveCheckBox, Views.matchWrapTop(context, 16));
         TextView modeNote = Views.label(context,
-                "Clear this only for the two-node simulator; active mode sends OBD requests.",
+                "Active (unchecked, recommended) also ACKs frames on the bus, which avoids a real "
+                        + "distortion Passive mode causes -- see FABIA_ANALYSIS.md. Passive adds no traffic "
+                        + "of its own but sees less real traffic as a result.",
                 12, false);
         modeNote.setTextColor(0xff52616b);
         root.addView(modeNote, Views.matchWrapTop(context, 2));

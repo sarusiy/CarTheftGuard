@@ -53,7 +53,7 @@ import java.util.function.Consumer;
 public final class BoardLink {
     public static final String TARGET_NAME = "JC-P4-C6";
     public static final String AP_SSID = "CarTheftGuard-P4";
-    public static final String AP_PASSWORD = "theftguard2026";
+    public static final String AP_PASSWORD = "&Car1310";
     public static final String AP_IP = "192.168.4.1";
     public static final int MIN_FREQ_MS = 10;
     public static final int MAX_FREQ_MS = 60000;
@@ -997,6 +997,35 @@ public final class BoardLink {
         networkExecutor.execute(() -> {
             try {
                 HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/uds/scan"));
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                post(() -> callback.accept(code < 400 ? response : null));
+            } catch (Exception exception) {
+                post(() -> callback.accept(null));
+            }
+        });
+    }
+
+    /** Raw JSON from GET /api/health -- includes firmware_version (ESP-IDF's
+     * auto git-describe string, see main.c's health_http_handler), the only
+     * way to confirm which firmware build is actually running on the board,
+     * e.g. after an OTA push. */
+    public void fetchHealth(Consumer<String> callback) {
+        if (callback == null) {
+            return;
+        }
+        Network network = boardNetwork;
+        if (network == null) {
+            callback.accept(null);
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/health"));
                 connection.setRequestMethod("GET");
                 connection.setConnectTimeout(3000);
                 connection.setReadTimeout(3000);

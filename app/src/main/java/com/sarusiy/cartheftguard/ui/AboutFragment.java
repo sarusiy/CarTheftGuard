@@ -28,6 +28,8 @@ import androidx.fragment.app.Fragment;
 import com.sarusiy.cartheftguard.BoardLink;
 import com.sarusiy.cartheftguard.DriveUpdates;
 
+import org.json.JSONObject;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -53,6 +55,16 @@ public class AboutFragment extends Fragment {
     private TextView driveCheckStatusText;
     private LinearLayout driveResultsContainer;
     private Button checkDriveButton;
+    /** Which status text/button a push-in-progress reports to -- the manual
+     * picker section and the two-step Drive flow's inline row each have
+     * their own, so progress shows up right where the user clicked instead
+     * of only in the (easy to miss) "Firmware Update (manual)" section
+     * lower on the screen. Set at the start of pushFirmwareBytes(). */
+    private TextView activeFirmwareStatusText;
+    private Button activePushButton;
+    private TextView pushDownloadedStatusText;
+    private Button pushDownloadedButton;
+    private TextView firmwareVersionText;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private int otaConfirmAttempts;
     private final Runnable otaConfirmRunnable = new Runnable() {
@@ -63,23 +75,24 @@ public class AboutFragment extends Fragment {
             }
             otaConfirmAttempts++;
             boardLink.fetchOtaStatus(response -> {
-                if (firmwareStatusText == null) {
+                if (activeFirmwareStatusText == null) {
                     return;
                 }
                 if (response != null) {
-                    firmwareStatusText.setText("Firmware update: board back online -- " + response);
-                    if (pushFirmwareButton != null) {
-                        pushFirmwareButton.setEnabled(true);
+                    activeFirmwareStatusText.setText("Firmware update: board back online -- " + response);
+                    if (activePushButton != null) {
+                        activePushButton.setEnabled(true);
                     }
+                    refreshFirmwareVersion();
                     return;
                 }
                 if (otaConfirmAttempts < OTA_CONFIRM_POLL_MAX_ATTEMPTS) {
                     handler.postDelayed(otaConfirmRunnable, OTA_CONFIRM_POLL_INTERVAL_MS);
                 } else {
-                    firmwareStatusText.setText("Firmware update: board did not come back online -- "
+                    activeFirmwareStatusText.setText("Firmware update: board did not come back online -- "
                             + "check it manually before assuming the update failed");
-                    if (pushFirmwareButton != null) {
-                        pushFirmwareButton.setEnabled(true);
+                    if (activePushButton != null) {
+                        activePushButton.setEnabled(true);
                     }
                 }
             });
@@ -128,6 +141,15 @@ public class AboutFragment extends Fragment {
         root.addView(infoRow(context, "Package", context.getPackageName()), Views.matchWrapTop(context, 8));
         root.addView(infoRow(context, "Board", BoardLink.TARGET_NAME + " (JC-ESP32P4-M3)"), Views.matchWrapTop(context, 8));
         root.addView(infoRow(context, "Board Wi-Fi", BoardLink.AP_SSID), Views.matchWrapTop(context, 8));
+        LinearLayout firmwareVersionRow = new LinearLayout(context);
+        firmwareVersionRow.setOrientation(LinearLayout.HORIZONTAL);
+        TextView firmwareVersionLabel = Views.label(context, "Firmware version", 14, true);
+        firmwareVersionLabel.setTextColor(0xff52616b);
+        firmwareVersionRow.addView(firmwareVersionLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        firmwareVersionText = Views.label(context, "checking...", 14, false);
+        firmwareVersionRow.addView(firmwareVersionText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2));
+        root.addView(firmwareVersionRow, Views.matchWrapTop(context, 8));
+        refreshFirmwareVersion();
 
         root.addView(Views.label(context, "About this app", 16, true), Views.matchWrapTop(context, 28));
         root.addView(Views.label(context, "Detects a JC-ESP32P4-M3 board nearby over BLE, then automatically joins "
@@ -154,6 +176,28 @@ public class AboutFragment extends Fragment {
         driveResultsContainer.setOrientation(LinearLayout.VERTICAL);
         root.addView(driveResultsContainer, Views.matchWrapTop(context, 4));
 
+        /* Deliberately built unconditionally here (not only inside the
+         * "Check Drive for updates" results list) and driven purely by
+         * whether downloadedFirmwareFile() exists on disk -- switching tabs
+         * to join the board's Wi-Fi and coming back recreates this
+         * fragment's whole view (onCreateView runs again), which wipes the
+         * dynamic driveResultsContainer list built by step 1. This section
+         * survives that because it re-checks the actual file on disk every
+         * time the view is built, instead of depending on in-memory state
+         * from a "Check Drive for updates" tap that may have happened
+         * before the view was torn down. */
+        root.addView(Views.label(context, "Push Downloaded Firmware", 16, true), Views.matchWrapTop(context, 28));
+        root.addView(Views.label(context, "Step 2 lives here permanently -- do step 1 above (needs internet), "
+                        + "then come back to this tab (needs only the board's Wi-Fi, even after switching tabs "
+                        + "to connect to it) and push from here.", 12, false),
+                Views.matchWrapTop(context, 4));
+        pushDownloadedStatusText = Views.label(context, "", 14, false);
+        root.addView(pushDownloadedStatusText, Views.matchWrapTop(context, 4));
+        pushDownloadedButton = Views.secondaryButton(context, "Push to board");
+        pushDownloadedButton.setOnClickListener(v -> pushDownloadedFirmware());
+        root.addView(pushDownloadedButton, Views.matchWrapTop(context, 8));
+        refreshPushDownloadedSection();
+
         root.addView(Views.label(context, "Firmware Update (manual)", 16, true), Views.matchWrapTop(context, 28));
         firmwareStatusText = Views.label(context, "Firmware update: idle", 14, false);
         root.addView(firmwareStatusText, Views.matchWrapTop(context, 4));
@@ -176,24 +220,29 @@ public class AboutFragment extends Fragment {
         driveCheckStatusText.setText("Checking Drive folder...");
         driveResultsContainer.removeAllViews();
 
-        DriveUpdates.findLatest(".bin", firmwareFile -> {
+        DriveUpdates.findLatest(".bin", result -> {
             if (!isAdded()) {
                 return;
             }
-            if (firmwareFile != null) {
-                addDriveResultRow("Firmware", firmwareFile, "Download & push to board",
-                        () -> pushFirmwareFromDrive(firmwareFile));
+            if (result.file != null) {
+                addFirmwareDriveResultRow(result.file);
+                fetchAndShowTargetVersion("jc-esp32p4-m3.version.txt");
+            } else if (result.error != null) {
+                addDriveErrorRow("firmware (.bin)", result.error);
             } else {
                 addDriveNotFoundRow("firmware (.bin)");
             }
         });
-        DriveUpdates.findLatest(".apk", apkFile -> {
+        DriveUpdates.findLatest(".apk", result -> {
             if (!isAdded()) {
                 return;
             }
-            if (apkFile != null) {
-                addDriveResultRow("App", apkFile, "Download & install",
-                        () -> installApkFromDrive(apkFile));
+            if (result.file != null) {
+                addDriveResultRow("App", result.file, "Download & install",
+                        (status, button) -> installApkFromDrive(result.file, status, button));
+                fetchAndShowTargetVersion("app-debug.version.txt");
+            } else if (result.error != null) {
+                addDriveErrorRow("app (.apk)", result.error);
             } else {
                 addDriveNotFoundRow("app (.apk)");
             }
@@ -202,15 +251,50 @@ public class AboutFragment extends Fragment {
         });
     }
 
-    private void addDriveResultRow(String kind, DriveUpdates.DriveFile file, String actionLabel, Runnable onAction) {
+    /** Looks up the small companion version-string file publish-*-to-drive.ps1
+     * uploads alongside each .bin/.apk (exact-name lookup via findLatest's
+     * suffix match -- passing the whole filename as "suffix" works since
+     * endsWith(wholeName) is effectively an exact match) and appends it as
+     * its own line, so you can compare the pending update's version against
+     * the "Version"/"Firmware version" rows above before committing to it.
+     * Best-effort: silently does nothing if the companion file is missing
+     * (e.g. an older publish predating this feature). */
+    private void fetchAndShowTargetVersion(String versionFileName) {
+        DriveUpdates.findLatest(versionFileName, result -> {
+            if (!isAdded() || result.file == null) {
+                return;
+            }
+            DriveUpdates.downloadText(result.file.id, version -> {
+                if (!isAdded() || version == null) {
+                    return;
+                }
+                TextView row = Views.label(requireContext(), "Target version: " + version, 12, false);
+                row.setTextColor(0xff0b6e69);
+                driveResultsContainer.addView(row, Views.matchWrapTop(requireContext(), 2));
+            });
+        });
+    }
+
+    private void addDriveResultRow(String kind, DriveUpdates.DriveFile file, String actionLabel,
+                                    java.util.function.BiConsumer<TextView, Button> onAction) {
         Context context = requireContext();
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(LinearLayout.VERTICAL);
         String sizeKb = String.valueOf(file.size / 1024);
         String when = file.modifiedTime.length() >= 16 ? file.modifiedTime.substring(0, 16).replace('T', ' ') : file.modifiedTime;
         row.addView(Views.label(context, kind + ": " + file.name + " (" + sizeKb + " KB, " + when + " UTC)", 13, false), Views.matchWrap());
+        TextView actionStatus = Views.label(context, "", 12, false);
+        row.addView(actionStatus, Views.matchWrapTop(context, 4));
         Button actionButton = Views.secondaryButton(context, actionLabel);
-        actionButton.setOnClickListener(v -> onAction.run());
+        actionButton.setOnClickListener(v -> {
+            /* Immediate, right at the button, so it never feels unresponsive
+             * during the gap before the first network callback lands --
+             * previously the only feedback was a status text far above this
+             * row, easy to miss, so tapping felt like nothing happened. */
+            actionButton.setEnabled(false);
+            actionStatus.setText("Starting...");
+            onAction.accept(actionStatus, actionButton);
+        });
         row.addView(actionButton, Views.matchWrapTop(context, 4));
         driveResultsContainer.addView(row, Views.matchWrapTop(context, 10));
     }
@@ -220,48 +304,123 @@ public class AboutFragment extends Fragment {
                 Views.matchWrapTop(requireContext(), 10));
     }
 
-    private void pushFirmwareFromDrive(DriveUpdates.DriveFile file) {
-        firmwareStatusText.setText("Firmware update: downloading " + file.name + " from Drive...");
-        File dest = new File(requireContext().getCacheDir(), "ota_download.bin");
-        DriveUpdates.download(file.id, dest, success -> {
-            if (!isAdded()) {
-                return;
-            }
-            if (!success) {
-                firmwareStatusText.setText("Firmware update: failed to download " + file.name + " from Drive");
-                return;
-            }
-            try (InputStream input = new FileInputStream(dest)) {
-                pushFirmwareBytes(readAllBytes(input));
-            } catch (IOException exception) {
-                firmwareStatusText.setText("Firmware update: failed to read downloaded file -- " + exception.getMessage());
-            }
-        });
+    private void addDriveErrorRow(String kindLabel, String error) {
+        TextView row = Views.label(requireContext(), "Couldn't check for " + kindLabel + ": " + error, 13, false);
+        row.setTextColor(0xffb00020);
+        driveResultsContainer.addView(row, Views.matchWrapTop(requireContext(), 10));
     }
 
-    private void installApkFromDrive(DriveUpdates.DriveFile file) {
-        driveCheckStatusText.setText("Downloading " + file.name + "...");
+    /** Same file every time -- deliberately not the SAF-invisible cache dir
+     * that the old combined download-then-push flow used, and deliberately
+     * not exposed to a file picker either: the app just reads back the
+     * exact file it wrote itself, so "push" never needs Drive or a picker,
+     * only whatever this fragment already downloaded. Survives app restart
+     * (getFilesDir(), not cache) so a download made before leaving Wi-Fi
+     * range is still there when you come back with the board instead. */
+    private File downloadedFirmwareFile() {
+        return new File(requireContext().getFilesDir(), "downloaded_firmware.bin");
+    }
+
+    /** Two separate steps instead of one combined "download & push" action --
+     * added after finding that a real car location often can't have both
+     * internet (for the Drive download) and the board's own Wi-Fi AP (for
+     * the push) connected at once. This row is step 1 only (download);
+     * step 2 (push) lives in the always-rebuilt "Push Downloaded Firmware"
+     * section instead of here, since switching tabs to join the board's
+     * Wi-Fi and coming back tears down and rebuilds this whole view,
+     * wiping whatever was in driveResultsContainer -- see
+     * refreshPushDownloadedSection's doc comment. */
+    private void addFirmwareDriveResultRow(DriveUpdates.DriveFile file) {
+        Context context = requireContext();
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.VERTICAL);
+        String sizeKb = String.valueOf(file.size / 1024);
+        String when = file.modifiedTime.length() >= 16 ? file.modifiedTime.substring(0, 16).replace('T', ' ') : file.modifiedTime;
+        row.addView(Views.label(context, "Firmware: " + file.name + " (" + sizeKb + " KB, " + when + " UTC)", 13, false),
+                Views.matchWrap());
+
+        TextView firmwareDriveStatus = Views.label(context, downloadedFirmwareFile().exists()
+                ? "Already downloaded to this phone -- see \"Push Downloaded Firmware\" below."
+                : "Not downloaded yet.", 12, false);
+        row.addView(firmwareDriveStatus, Views.matchWrapTop(context, 4));
+
+        Button downloadButton = Views.secondaryButton(context, "1. Download to phone (needs internet, not the board)");
+        downloadButton.setOnClickListener(v -> {
+            downloadButton.setEnabled(false);
+            firmwareDriveStatus.setText("Downloading " + file.name + "...");
+            DriveUpdates.download(file.id, downloadedFirmwareFile(), error -> {
+                downloadButton.setEnabled(true);
+                if (!isAdded()) {
+                    return;
+                }
+                firmwareDriveStatus.setText(error != null
+                        ? "Download failed -- " + error
+                        : "Downloaded -- see \"Push Downloaded Firmware\" below (works after switching to the board's Wi-Fi).");
+                refreshPushDownloadedSection();
+            });
+        });
+        row.addView(downloadButton, Views.matchWrapTop(context, 8));
+
+        driveResultsContainer.addView(row, Views.matchWrapTop(context, 10));
+    }
+
+    /** Reflects whatever's actually on disk right now -- called on every
+     * view build (so it survives a tab-switch-and-back) and again right
+     * after a successful download (so it updates immediately without
+     * needing to leave and return to this tab). */
+    private void refreshPushDownloadedSection() {
+        if (pushDownloadedStatusText == null || pushDownloadedButton == null) {
+            return;
+        }
+        boolean ready = downloadedFirmwareFile().exists();
+        pushDownloadedStatusText.setText(ready
+                ? "A downloaded firmware image is ready. Connect to the board's Wi-Fi, then push."
+                : "Nothing downloaded yet -- use step 1 above first (needs internet).");
+        pushDownloadedButton.setEnabled(ready);
+    }
+
+    private void pushDownloadedFirmware() {
+        File dest = downloadedFirmwareFile();
+        if (!dest.exists()) {
+            pushDownloadedStatusText.setText("Nothing downloaded yet -- use step 1 above first.");
+            return;
+        }
+        pushDownloadedButton.setEnabled(false);
+        try (InputStream input = new FileInputStream(dest)) {
+            pushFirmwareBytes(readAllBytes(input), pushDownloadedStatusText, pushDownloadedButton);
+        } catch (IOException exception) {
+            pushDownloadedButton.setEnabled(true);
+            pushDownloadedStatusText.setText("Failed to read downloaded file -- " + exception.getMessage());
+        }
+    }
+
+    private void installApkFromDrive(DriveUpdates.DriveFile file, TextView status, Button button) {
+        status.setText("Downloading " + file.name + "...");
         File dest = new File(requireContext().getCacheDir(), "update.apk");
-        DriveUpdates.download(file.id, dest, success -> {
+        DriveUpdates.download(file.id, dest, error -> {
             if (!isAdded()) {
                 return;
             }
-            if (!success) {
-                driveCheckStatusText.setText("Failed to download " + file.name);
+            if (error != null) {
+                status.setText("Failed to download " + file.name + " -- " + error);
+                button.setEnabled(true);
                 return;
             }
             Context context = requireContext();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.getPackageManager().canRequestPackageInstalls()) {
-                driveCheckStatusText.setText("Grant \"install unknown apps\" for CarTheftGuard, then tap Install again.");
+                status.setText("Grant \"install unknown apps\" for CarTheftGuard, then tap Install again.");
+                button.setEnabled(true);
                 startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                         Uri.parse("package:" + context.getPackageName())));
                 return;
             }
+            status.setText("Downloaded -- opening installer...");
             Uri apkUri = FileProvider.getUriForFile(context, context.getPackageName() + ".fileprovider", dest);
             Intent install = new Intent(Intent.ACTION_VIEW);
             install.setDataAndType(apkUri, "application/vnd.android.package-archive");
             install.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(install);
+            button.setEnabled(true);
         });
     }
 
@@ -279,7 +438,7 @@ public class AboutFragment extends Fragment {
             pushFirmwareButton.setEnabled(true);
             return;
         }
-        pushFirmwareBytes(firmware);
+        pushFirmwareBytes(firmware, firmwareStatusText, pushFirmwareButton);
     }
 
     private byte[] readAllBytes(InputStream input) throws IOException {
@@ -292,29 +451,75 @@ public class AboutFragment extends Fragment {
         return buffer.toByteArray();
     }
 
-    private void pushFirmwareBytes(byte[] firmware) {
-        pushFirmwareButton.setEnabled(false);
-        firmwareStatusText.setText("Firmware update: uploading 0%");
+    /** {@code statusText}/{@code button} let this be called from either the
+     * manual-picker section or the two-step Drive flow's own row, so
+     * progress always shows up right where the user clicked -- see
+     * activeFirmwareStatusText's doc comment. */
+    private void pushFirmwareBytes(byte[] firmware, TextView statusText, Button button) {
+        activeFirmwareStatusText = statusText;
+        activePushButton = button;
+        if (button != null) {
+            button.setEnabled(false);
+        }
+        statusText.setText("Firmware update: uploading 0%");
         boardLink.pushFirmware(firmware, new BoardLink.OtaListener() {
             @Override
             public void onProgress(int percent) {
-                if (firmwareStatusText != null) {
-                    firmwareStatusText.setText("Firmware update: uploading " + percent + "%");
+                if (activeFirmwareStatusText != null) {
+                    activeFirmwareStatusText.setText("Firmware update: uploading " + percent + "%");
                 }
             }
 
             @Override
             public void onResult(boolean success, String message) {
-                if (firmwareStatusText == null) {
+                if (activeFirmwareStatusText == null) {
                     return;
                 }
-                /* Either outcome can legitimately mean the board rebooted mid-response
-                 * (see BoardLink.pushFirmware's doc comment) -- confirm independently by
-                 * polling GET /api/ota rather than trusting this callback alone. */
-                firmwareStatusText.setText("Firmware update: upload finished (" + message + "), confirming reboot...");
+                /* "Not connected to the board" means the upload never even
+                 * started (no network to send to) -- unambiguous failure,
+                 * not the "maybe it rebooted mid-response" case below, so
+                 * don't claim a reboot is being confirmed when nothing was
+                 * ever sent. Any other outcome (including a reported
+                 * failure) can legitimately mean the board rebooted
+                 * mid-response (see BoardLink.pushFirmware's doc comment),
+                 * so those still get confirmed by polling GET /api/ota
+                 * rather than trusting this callback alone. */
+                if (!success && "Not connected to the board".equals(message)) {
+                    activeFirmwareStatusText.setText("Firmware update: failed -- not connected to the board. "
+                            + "Join its Wi-Fi first, then try again.");
+                    if (activePushButton != null) {
+                        activePushButton.setEnabled(true);
+                    }
+                    return;
+                }
+                activeFirmwareStatusText.setText("Firmware update: upload finished (" + message + "), confirming reboot...");
                 handler.removeCallbacks(otaConfirmRunnable);
                 otaConfirmAttempts = 0;
                 handler.postDelayed(otaConfirmRunnable, OTA_CONFIRM_POLL_INTERVAL_MS);
+            }
+        });
+    }
+
+    /** Pulls firmware_version from GET /api/health (see main.c's
+     * health_http_handler) -- the only way to confirm which firmware build
+     * is actually running on the board, e.g. right after an OTA push.
+     * Called on view build and again once a push's reboot is confirmed. */
+    private void refreshFirmwareVersion() {
+        if (firmwareVersionText == null || boardLink == null) {
+            return;
+        }
+        boardLink.fetchHealth(json -> {
+            if (firmwareVersionText == null) {
+                return;
+            }
+            if (json == null) {
+                firmwareVersionText.setText("not connected to the board");
+                return;
+            }
+            try {
+                firmwareVersionText.setText(new JSONObject(json).optString("firmware_version", "unknown"));
+            } catch (Exception exception) {
+                firmwareVersionText.setText("unknown (malformed response)");
             }
         });
     }
