@@ -38,6 +38,7 @@ import com.sarusiy.cartheftguard.UdsAddrScanLog;
 import com.sarusiy.cartheftguard.UdsScanLog;
 import com.sarusiy.cartheftguard.UdsTargets;
 import com.sarusiy.cartheftguard.UploadCleanup;
+import com.sarusiy.cartheftguard.VwtpScanLog;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -89,6 +90,19 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     private BoardLink boardLink;
     private Button startButton;
     private Button stopButton;
+    /** Mirrors the statusReceiver's EXTRA_RUNNING -- lets the address-scan
+     * and VWTP-scan Start buttons (which don't otherwise touch recording at
+     * all) know whether a recording is already in flight before deciding to
+     * auto-start one, without depending on button-enabled state as a proxy. */
+    private boolean recordingActive;
+    /** True only when the CURRENT recording was started by
+     * ensureRecordingWithLabel (address scan / VWTP scan / deep scan), not
+     * by the user tapping "Start recording" directly -- lets each scan's
+     * poller auto-stop the recording it auto-started once the scan reaches
+     * a terminal state, without ever auto-stopping a recording the user
+     * started themselves. Reset to false both when a manual "Start
+     * recording" begins and when any Stop happens (manual or automatic). */
+    private boolean recordingAutoStartedByScan;
     private CheckBox passiveCheckBox;
     private TextView connectionText;
     private TextView countText;
@@ -255,6 +269,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                                     resultCount, hits.toString());
                             addrScanActive = false;
                         }
+                        stopRecordingIfAutoStarted();
                     } else if (addrScanActive) {
                         /* Any other state (the firmware's own default is
                          * "idle") while we were still expecting "running" or
@@ -269,6 +284,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                         addrScanStatusText.setText("Address scan: board appears to have reset "
                                 + "(lost scan progress) -- check its connection and try again.");
                         addrScanActive = false;
+                        stopRecordingIfAutoStarted();
                     }
                 } catch (JSONException exception) {
                     addrScanStatusText.setText("Address scan: malformed status response");
@@ -289,6 +305,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         addrScanActive = true;
         addrScanStatusText.setText("Address scan: starting 0x" + Integer.toHexString(start)
                 + "-0x" + Integer.toHexString(end) + "...");
+        ensureRecordingWithLabel("addrscan-" + Integer.toHexString(start) + "-" + Integer.toHexString(end));
         udsPollHandler.removeCallbacksAndMessages(null);
         boardLink.startUdsAddrScan(start, end, ADDR_SCAN_RESPONSE_OFFSET, started -> {
             if (started) {
@@ -296,6 +313,274 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
             } else {
                 addrScanStatusText.setText("Address scan: failed to start");
                 addrScanActive = false;
+            }
+        });
+    }
+
+    /** VWTP 2.0 connection-setup probe -- a different addressing scheme
+     * from the direct address sweep above: candidates are single-byte
+     * logical module addresses (VCDS-style numbers), not raw CAN IDs, and
+     * every request goes to a fixed CAN ID (0x200) rather than a per-
+     * candidate one. Added 2026-09-16 after the full 0x700-0x7FF sweep
+     * found only the Gateway reachable -- see BoardLink.startVwtpScan's
+     * doc comment and UDS_BODY_MODULE_RESEARCH.md. */
+    private EditText vwtpAddrStartInput;
+    private EditText vwtpAddrEndInput;
+    private EditText vwtpRxIdInput;
+    private TextView vwtpScanStatusText;
+    private int activeVwtpAddrStart;
+    private int activeVwtpAddrEnd;
+    private int activeVwtpRxId;
+    private boolean vwtpScanActive;
+    private final Runnable vwtpScanPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isAdded()) {
+                return;
+            }
+            boardLink.fetchVwtpScanStatus((json, reason) -> {
+                if (!isAdded() || vwtpScanStatusText == null) {
+                    return;
+                }
+                if (json == null) {
+                    /* Unlike before the NVS-backed resume was added
+                     * (2026-09-17), this no longer means the scan is dead --
+                     * the board resumes on its own after a reset, same
+                     * reasoning as deepScanPollRunnable's null-json branch.
+                     * Keep polling instead of giving up. */
+                    if (vwtpScanActive) {
+                        vwtpScanStatusText.setText("VWTP scan: board unreachable (" + reason
+                                + ") -- it resumes on its own once back, still watching...");
+                        udsPollHandler.postDelayed(this, UDS_POLL_INTERVAL_MS);
+                    } else {
+                        vwtpScanStatusText.setText("VWTP scan: status unavailable -- " + reason);
+                    }
+                    return;
+                }
+                try {
+                    JSONObject status = new JSONObject(json);
+                    String state = status.optString("state", "idle");
+                    int resultCount = status.optInt("result_count", 0);
+                    String currentAddr = status.optString("current_addr", "");
+                    if ("running".equals(state)) {
+                        vwtpScanStatusText.setText("VWTP scan: running (probing " + currentAddr + ", "
+                                + resultCount + " hit(s) so far)");
+                        udsPollHandler.postDelayed(this, UDS_POLL_INTERVAL_MS);
+                    } else if ("done".equals(state) || "error".equals(state)) {
+                        StringBuilder hits = new StringBuilder();
+                        JSONArray results = status.optJSONArray("results");
+                        if (results != null) {
+                            for (int i = 0; i < results.length(); i++) {
+                                JSONObject hit = results.optJSONObject(i);
+                                if (hit == null) {
+                                    continue;
+                                }
+                                if (hits.length() > 0) {
+                                    hits.append("; ");
+                                }
+                                hits.append(hit.optString("addr", "?")).append(" (")
+                                        .append(hit.optString("session", "?")).append(", tx=")
+                                        .append(hit.optString("tx_id", "?")).append(")");
+                            }
+                        }
+                        vwtpScanStatusText.setText("error".equals(state)
+                                ? "VWTP scan: failed (board is in Passive mode?)"
+                                : (resultCount == 0
+                                        ? "VWTP scan: done, no address responded in this range"
+                                        : "VWTP scan: done, " + resultCount + " address(es) responded -- "
+                                                + hits));
+                        if (vwtpScanActive) {
+                            VwtpScanLog.append(requireContext(), selectedCarId, activeVwtpAddrStart,
+                                    activeVwtpAddrEnd, activeVwtpRxId, state, currentAddr,
+                                    resultCount, hits.toString());
+                            vwtpScanActive = false;
+                        }
+                        stopRecordingIfAutoStarted();
+                    } else if (vwtpScanActive) {
+                        /* With NVS-backed resume in place, a genuine reset
+                         * should show up as a status-fetch failure (handled
+                         * above) followed by the scan coming back RUNNING on
+                         * its own -- reaching this "idle while we expected
+                         * running" case now more likely means something else
+                         * went wrong (e.g. a fresh scan started from a
+                         * different client) than a simple reset. */
+                        vwtpScanStatusText.setText("VWTP scan: unexpected idle state "
+                                + "(lost scan progress) -- check its connection and try again.");
+                        vwtpScanActive = false;
+                        stopRecordingIfAutoStarted();
+                    }
+                } catch (JSONException exception) {
+                    vwtpScanStatusText.setText("VWTP scan: malformed status response");
+                }
+            });
+        }
+    };
+
+    private void startVwtpScan() {
+        int start = parseHexOrDefault(vwtpAddrStartInput, 0x00);
+        int end = parseHexOrDefault(vwtpAddrEndInput, 0xFF);
+        int rxId = parseHexOrDefault(vwtpRxIdInput, 0x300);
+        if (end < start || end > 0xFF) {
+            vwtpScanStatusText.setText("Range end must be >= start and <= 0xFF.");
+            return;
+        }
+        activeVwtpAddrStart = start;
+        activeVwtpAddrEnd = end;
+        activeVwtpRxId = rxId;
+        vwtpScanActive = true;
+        vwtpScanStatusText.setText("VWTP scan: starting 0x" + Integer.toHexString(start)
+                + "-0x" + Integer.toHexString(end) + "...");
+        ensureRecordingWithLabel("vwtp-" + Integer.toHexString(start) + "-" + Integer.toHexString(end));
+        udsPollHandler.removeCallbacksAndMessages(null);
+        boardLink.startVwtpScan(start, end, rxId, (started, reason) -> {
+            if (started) {
+                udsPollHandler.postDelayed(vwtpScanPollRunnable, UDS_POLL_INTERVAL_MS);
+            } else {
+                vwtpScanStatusText.setText("VWTP scan: failed to start -- " + reason);
+                vwtpScanActive = false;
+            }
+        });
+    }
+
+    /** Deep scan -- see BoardLink.startDeepScan's doc comment. Unlike every
+     * other poller on this screen, a failed status fetch here does NOT stop
+     * polling: the whole point of this feature is that the firmware keeps
+     * (or resumes) the scan on its own across a brownout reset, so a
+     * transient "board unreachable" is expected mid-run, not a reason to
+     * give up watching. */
+    private EditText deepScanStartInput;
+    private EditText deepScanEndInput;
+    private TextView deepScanStatusText;
+    private final Runnable deepScanPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isAdded()) {
+                return;
+            }
+            boardLink.fetchDeepScanStatus((json, reason) -> {
+                if (!isAdded() || deepScanStatusText == null) {
+                    return;
+                }
+                if (json == null) {
+                    deepScanStatusText.setText("Deep scan: board unreachable (" + reason
+                            + ") -- it resumes on its own once back, still watching...");
+                    udsPollHandler.postDelayed(this, UDS_POLL_INTERVAL_MS);
+                    return;
+                }
+                try {
+                    JSONObject status = new JSONObject(json);
+                    String state = status.optString("state", "idle");
+                    int hitCount = status.optInt("hit_count", 0);
+                    String currentReq = status.optString("current_req", "");
+                    if ("running".equals(state)) {
+                        deepScanStatusText.setText("Deep scan: running (probing " + currentReq + ", "
+                                + hitCount + " module(s) identified so far)\n" + summarizeDeepScanHits(status));
+                        udsPollHandler.postDelayed(this, UDS_POLL_INTERVAL_MS);
+                    } else if ("done".equals(state)) {
+                        deepScanStatusText.setText((hitCount == 0
+                                ? "Deep scan: done, no address responded in this range"
+                                : "Deep scan: done, " + hitCount + " module(s) identified") + "\n"
+                                + summarizeDeepScanHits(status));
+                        stopRecordingIfAutoStarted();
+                    } else if ("error".equals(state)) {
+                        deepScanStatusText.setText("Deep scan: failed (board is in Passive mode?)");
+                        stopRecordingIfAutoStarted();
+                    }
+                    /* "idle" -- nothing has ever been started, or this is
+                     * refreshDeepScanStatusOnce() on a fresh view build with
+                     * no scan running; leave whatever text is already there
+                     * (blank on first build) rather than overwriting it. */
+                } catch (JSONException exception) {
+                    deepScanStatusText.setText("Deep scan: malformed status response");
+                }
+            });
+        }
+    };
+
+    private String summarizeDeepScanHits(JSONObject status) {
+        JSONArray hits = status.optJSONArray("hits");
+        if (hits == null || hits.length() == 0) {
+            return "";
+        }
+        StringBuilder summary = new StringBuilder();
+        for (int i = 0; i < hits.length(); i++) {
+            JSONObject hit = hits.optJSONObject(i);
+            if (hit == null) {
+                continue;
+            }
+            if (summary.length() > 0) {
+                summary.append("\n");
+            }
+            summary.append(hit.optString("addr", "?")).append(" (").append(hit.optString("session", "?")).append(")");
+            JSONArray didResults = hit.optJSONArray("did_results");
+            if (didResults != null) {
+                for (int d = 0; d < didResults.length(); d++) {
+                    JSONObject didResult = didResults.optJSONObject(d);
+                    if (didResult == null) {
+                        continue;
+                    }
+                    String hex = didResult.optString("data", "");
+                    summary.append("\n    ").append(didResult.optString("did", "?"))
+                            .append(": ").append(hex).append(" (").append(hexToAscii(hex)).append(")");
+                }
+            }
+        }
+        return summary.toString();
+    }
+
+    /** Best-effort readable rendering of a hex byte string -- identification
+     * DIDs (part numbers, system names) are frequently plain ASCII, so
+     * showing this alongside the raw hex saves manually decoding it. */
+    private String hexToAscii(String hex) {
+        StringBuilder ascii = new StringBuilder();
+        for (int i = 0; i + 1 < hex.length(); i += 2) {
+            try {
+                int value = Integer.parseInt(hex.substring(i, i + 2), 16);
+                ascii.append(value >= 0x20 && value < 0x7F ? (char) value : '.');
+            } catch (NumberFormatException exception) {
+                ascii.append('.');
+            }
+        }
+        return ascii.toString();
+    }
+
+    private void startDeepScan() {
+        int start = parseHexOrDefault(deepScanStartInput, 0x700);
+        int end = parseHexOrDefault(deepScanEndInput, 0x7FF);
+        if (end < start) {
+            deepScanStatusText.setText("Range end must be >= start.");
+            return;
+        }
+        deepScanStatusText.setText("Deep scan: starting 0x" + Integer.toHexString(start)
+                + "-0x" + Integer.toHexString(end) + "...");
+        ensureRecordingWithLabel("deepscan-" + Integer.toHexString(start) + "-" + Integer.toHexString(end));
+        udsPollHandler.removeCallbacksAndMessages(null);
+        boardLink.startDeepScan(start, end, ADDR_SCAN_RESPONSE_OFFSET, false, (started, reason) -> {
+            if (started) {
+                udsPollHandler.postDelayed(deepScanPollRunnable, UDS_POLL_INTERVAL_MS);
+            } else {
+                deepScanStatusText.setText("Deep scan: failed to start -- " + reason);
+            }
+        });
+    }
+
+    /** Called once when this view is built (not on a timer) -- a deep scan
+     * may already be running (or mid-resume after a reset) from before this
+     * screen was even opened, since it's designed to run unattended. If so,
+     * start polling immediately instead of showing a blank status until the
+     * user taps Start again. */
+    private void refreshDeepScanStatusOnce() {
+        boardLink.fetchDeepScanStatus((json, reason) -> {
+            if (!isAdded() || deepScanStatusText == null || json == null) {
+                return;
+            }
+            try {
+                String state = new JSONObject(json).optString("state", "idle");
+                if ("running".equals(state)) {
+                    udsPollHandler.postDelayed(deepScanPollRunnable, UDS_POLL_INTERVAL_MS);
+                }
+            } catch (JSONException ignored) {
+                /* Leave status blank -- next explicit Start will report any real problem. */
             }
         });
     }
@@ -329,6 +614,7 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         @Override
         public void onReceive(Context context, Intent intent) {
             boolean running = intent.getBooleanExtra(CanCaptureService.EXTRA_RUNNING, false);
+            recordingActive = running;
             long frames = intent.getLongExtra(CanCaptureService.EXTRA_FRAMES, 0);
             long dropped = intent.getLongExtra(CanCaptureService.EXTRA_DROPPED, 0);
             String file = intent.getStringExtra(CanCaptureService.EXTRA_FILE);
@@ -504,6 +790,66 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         addrScanStatusText = Views.label(context, "", 12, false);
         addrScanStatusText.setTextColor(0xff0b6e69);
         root.addView(addrScanStatusText, Views.matchWrapTop(context, 4));
+
+        root.addView(Views.label(context, "VWTP 2.0 connection probe (older routing scheme)", 16, true),
+                Views.matchWrapTop(context, 20));
+        root.addView(Views.label(context,
+                        "Direct address scan above found only the Gateway -- body modules may need this "
+                                + "older, session-based scheme instead: requests always go to CAN ID 0x200 with "
+                                + "a single-byte logical module address (VCDS-style numbers), not a raw CAN ID "
+                                + "per module. Independent of everything else on this screen.",
+                        12, false),
+                Views.matchWrapTop(context, 4));
+        LinearLayout vwtpAddrRow = new LinearLayout(context);
+        vwtpAddrRow.setOrientation(LinearLayout.HORIZONTAL);
+        vwtpAddrStartInput = Views.input(context, "Start (hex)", android.text.InputType.TYPE_CLASS_TEXT);
+        vwtpAddrStartInput.setText("00");
+        vwtpAddrRow.addView(vwtpAddrStartInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        vwtpAddrEndInput = Views.input(context, "End (hex)", android.text.InputType.TYPE_CLASS_TEXT);
+        vwtpAddrEndInput.setText("FF");
+        LinearLayout.LayoutParams vwtpEndParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        vwtpEndParams.leftMargin = Views.dp(context, 8);
+        vwtpAddrRow.addView(vwtpAddrEndInput, vwtpEndParams);
+        root.addView(vwtpAddrRow, Views.matchWrapTop(context, 8));
+        vwtpRxIdInput = Views.input(context, "Our RX id (hex, e.g. 300)", android.text.InputType.TYPE_CLASS_TEXT);
+        vwtpRxIdInput.setText("300");
+        root.addView(vwtpRxIdInput, Views.matchWrapTop(context, 8));
+        Button vwtpScanButton = Views.secondaryButton(context, "Start VWTP scan");
+        vwtpScanButton.setOnClickListener(view -> startVwtpScan());
+        root.addView(vwtpScanButton, Views.matchHeightTop(context, 46, 8));
+        vwtpScanStatusText = Views.label(context, "", 12, false);
+        vwtpScanStatusText.setTextColor(0xff0b6e69);
+        root.addView(vwtpScanStatusText, Views.matchWrapTop(context, 4));
+
+        root.addView(Views.label(context, "Deep scan (unattended, address + auto-identify)", 16, true),
+                Views.matchWrapTop(context, 20));
+        root.addView(Views.label(context,
+                        "Combines the address scan above with an automatic identification-DID sweep "
+                                + "(0xF180-0xF1A0) against every address that responds -- no need to notice a hit "
+                                + "and manually re-scan it. Meant to run unattended: the board persists progress "
+                                + "and resumes on its own after a reset (e.g. a brownout), so it keeps going even "
+                                + "if this screen disconnects or the app closes. Independent of everything else "
+                                + "on this screen.",
+                        12, false),
+                Views.matchWrapTop(context, 4));
+        LinearLayout deepScanRow = new LinearLayout(context);
+        deepScanRow.setOrientation(LinearLayout.HORIZONTAL);
+        deepScanStartInput = Views.input(context, "Start (hex)", android.text.InputType.TYPE_CLASS_TEXT);
+        deepScanStartInput.setText("700");
+        deepScanRow.addView(deepScanStartInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        deepScanEndInput = Views.input(context, "End (hex)", android.text.InputType.TYPE_CLASS_TEXT);
+        deepScanEndInput.setText("7FF");
+        LinearLayout.LayoutParams deepScanEndParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        deepScanEndParams.leftMargin = Views.dp(context, 8);
+        deepScanRow.addView(deepScanEndInput, deepScanEndParams);
+        root.addView(deepScanRow, Views.matchWrapTop(context, 8));
+        Button deepScanButton = Views.secondaryButton(context, "Start deep scan");
+        deepScanButton.setOnClickListener(view -> startDeepScan());
+        root.addView(deepScanButton, Views.matchHeightTop(context, 46, 8));
+        deepScanStatusText = Views.label(context, "", 12, false);
+        deepScanStatusText.setTextColor(0xff0b6e69);
+        root.addView(deepScanStatusText, Views.matchWrapTop(context, 4));
+        refreshDeepScanStatusOnce();
 
         startButton = Views.primaryButton(context, "Start recording");
         startButton.setOnClickListener(view -> startRecording());
@@ -739,6 +1085,43 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         updateUdsEstimate();
     }
 
+    /** Turns a free-text label (a UdsTargets.Target's human-readable label,
+     * which may contain spaces/parens/commas) into a safe filename prefix
+     * fragment: lowercase, non-alphanumeric runs collapsed to a single "-",
+     * trimmed of leading/trailing "-", capped so the whole filename stays
+     * reasonable. */
+    private String slug(String text) {
+        String result = text.toLowerCase(java.util.Locale.US)
+                .replaceAll("[^a-z0-9]+", "-")
+                .replaceAll("^-+|-+$", "");
+        return result.length() > 24 ? result.substring(0, 24) : result;
+    }
+
+    /** Starts a recording labeled for the given source only if one isn't
+     * already running -- used by the address-scan and VWTP-scan Start
+     * buttons, which are otherwise completely independent of the Record/Stop
+     * buttons (see RecordFragment's doc comment on recordingActive). Never
+     * stops or relabels an already-running recording -- if the user started
+     * one manually first, that's respected as-is rather than being
+     * silently swapped out. */
+    private void ensureRecordingWithLabel(String label) {
+        if (!recordingActive) {
+            recordingAutoStartedByScan = true;
+            startRecording(label);
+        }
+    }
+
+    /** Called from each scan poller (address/VWTP/deep) once it reaches a
+     * terminal outcome -- stops the recording ONLY if this fragment is the
+     * one that auto-started it via ensureRecordingWithLabel, never a
+     * recording the user started manually (which stays running until they
+     * tap Stop themselves, exactly as before this auto-stop existed). */
+    private void stopRecordingIfAutoStarted() {
+        if (recordingAutoStartedByScan && recordingActive) {
+            stopRecording();
+        }
+    }
+
     private int parseHexOrDefault(EditText input, int fallback) {
         try {
             return Integer.parseInt(input.getText().toString().trim(), 16);
@@ -770,18 +1153,18 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
                 + " -- keep recording running at least that long to be sure the sweep finishes.");
     }
 
+    /** The "Start recording" button: labels the file by whichever DID-sweep
+     * target is selected (this button also kicks off that sweep, below --
+     * see the doc comment on ensureRecordingWithLabel for why that side
+     * effect must NOT also apply to the address-scan/VWTP-scan buttons that
+     * reuse startRecording(String) just to get a labeled file started). */
     private void startRecording() {
-        if (!boardLink.isWifiReady()) {
-            updateConnectionState();
+        String label = (selectedUdsTarget != null && !passiveCheckBox.isChecked())
+                ? "uds-" + slug(selectedUdsTarget.label) : "can";
+        recordingAutoStartedByScan = false;
+        if (!startRecording(label)) {
             return;
         }
-        Intent intent = new Intent(requireContext(), CanCaptureService.class)
-                .setAction(CanCaptureService.ACTION_START)
-                .putExtra(CanCaptureService.EXTRA_BOARD_IP, boardLink.getBoardIp())
-                .putExtra(CanCaptureService.EXTRA_PASSIVE, passiveCheckBox.isChecked())
-                .putExtra(CanCaptureService.EXTRA_CAR, selectedCarId);
-        ContextCompat.startForegroundService(requireContext(), intent);
-
         udsPollHandler.removeCallbacksAndMessages(null);
         if (selectedUdsTarget != null && !passiveCheckBox.isChecked()) {
             int didStart = parseHexOrDefault(udsDidStartInput, UdsTargets.DEFAULT_DID_START);
@@ -805,7 +1188,31 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         }
     }
 
+    /** Just starts the CSV recording service with the given file-name label
+     * -- no side effects beyond that. Deliberately does NOT also trigger the
+     * DID-sweep-by-target behavior that the no-arg startRecording() (the
+     * "Start recording" button itself) has -- ensureRecordingWithLabel calls
+     * this directly from the address-scan/VWTP-scan buttons, and those must
+     * not silently also kick off an unrelated DID sweep against whatever
+     * target happens to be selected in the list. Returns false (does
+     * nothing else) if the board isn't connected yet. */
+    private boolean startRecording(String label) {
+        if (!boardLink.isWifiReady()) {
+            updateConnectionState();
+            return false;
+        }
+        Intent intent = new Intent(requireContext(), CanCaptureService.class)
+                .setAction(CanCaptureService.ACTION_START)
+                .putExtra(CanCaptureService.EXTRA_BOARD_IP, boardLink.getBoardIp())
+                .putExtra(CanCaptureService.EXTRA_PASSIVE, passiveCheckBox.isChecked())
+                .putExtra(CanCaptureService.EXTRA_CAR, selectedCarId)
+                .putExtra(CanCaptureService.EXTRA_LABEL, label);
+        ContextCompat.startForegroundService(requireContext(), intent);
+        return true;
+    }
+
     private void stopRecording() {
+        recordingAutoStartedByScan = false;
         Intent intent = new Intent(requireContext(), CanCaptureService.class)
                 .setAction(CanCaptureService.ACTION_STOP);
         requireContext().startService(intent);

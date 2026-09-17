@@ -79,10 +79,31 @@ public class AboutFragment extends Fragment {
                     return;
                 }
                 if (response != null) {
-                    activeFirmwareStatusText.setText("Firmware update: board back online -- " + response);
-                    if (activePushButton != null) {
-                        activePushButton.setEnabled(true);
-                    }
+                    /* The board rebooting and answering GET /api/ota again
+                     * only proves *some* image is running -- it doesn't by
+                     * itself say the new one took. Fetch /api/health right
+                     * here and print firmware_version into this same status
+                     * line (not just the far-away top info row that
+                     * refreshFirmwareVersion() also updates) so the version
+                     * that's now actually running is visible right where the
+                     * user clicked push. */
+                    boardLink.fetchHealth(json -> {
+                        if (activeFirmwareStatusText == null) {
+                            return;
+                        }
+                        String runningVersion = "unknown";
+                        if (json != null) {
+                            try {
+                                runningVersion = new JSONObject(json).optString("firmware_version", "unknown");
+                            } catch (Exception exception) {
+                                runningVersion = "unknown (malformed response)";
+                            }
+                        }
+                        activeFirmwareStatusText.setText("Firmware update succeeded -- board is now running " + runningVersion);
+                        if (activePushButton != null) {
+                            activePushButton.setEnabled(true);
+                        }
+                    });
                     refreshFirmwareVersion();
                     return;
                 }
@@ -344,7 +365,41 @@ public class AboutFragment extends Fragment {
                 : "Not downloaded yet.", 12, false);
         row.addView(firmwareDriveStatus, Views.matchWrapTop(context, 4));
 
-        Button downloadButton = Views.secondaryButton(context, "1. Download to phone (needs internet, not the board)");
+        /* Works while connected to the board's Wi-Fi AP as long as the phone
+         * also has a cellular data connection: BoardLink binds every board
+         * call to the AP's own Network object explicitly (see boardNetwork /
+         * network.openConnection in BoardLink.java), while this download
+         * uses the default network, which Android routes over cellular once
+         * it's available (the AP has no internet capability of its own). So
+         * the two no longer need to be sequenced by hand -- only kept apart
+         * when there's no cellular fallback, hence the manual-download
+         * option below still exists for that case. */
+        Button combinedButton = Views.secondaryButton(context, "Download & push to board (needs cellular data + board Wi-Fi)");
+        combinedButton.setOnClickListener(v -> {
+            combinedButton.setEnabled(false);
+            firmwareDriveStatus.setText("Downloading " + file.name + "...");
+            DriveUpdates.download(file.id, downloadedFirmwareFile(), error -> {
+                if (!isAdded()) {
+                    return;
+                }
+                if (error != null) {
+                    firmwareDriveStatus.setText("Download failed -- " + error);
+                    combinedButton.setEnabled(true);
+                    return;
+                }
+                refreshPushDownloadedSection();
+                firmwareDriveStatus.setText("Downloaded -- pushing to board...");
+                try (InputStream input = new FileInputStream(downloadedFirmwareFile())) {
+                    pushFirmwareBytes(readAllBytes(input), firmwareDriveStatus, combinedButton);
+                } catch (IOException exception) {
+                    firmwareDriveStatus.setText("Downloaded, but failed to read the file for push -- " + exception.getMessage());
+                    combinedButton.setEnabled(true);
+                }
+            });
+        });
+        row.addView(combinedButton, Views.matchWrapTop(context, 8));
+
+        Button downloadButton = Views.secondaryButton(context, "Download only (no cellular data right now)");
         downloadButton.setOnClickListener(v -> {
             downloadButton.setEnabled(false);
             firmwareDriveStatus.setText("Downloading " + file.name + "...");
@@ -359,7 +414,7 @@ public class AboutFragment extends Fragment {
                 refreshPushDownloadedSection();
             });
         });
-        row.addView(downloadButton, Views.matchWrapTop(context, 8));
+        row.addView(downloadButton, Views.matchWrapTop(context, 4));
 
         driveResultsContainer.addView(row, Views.matchWrapTop(context, 10));
     }

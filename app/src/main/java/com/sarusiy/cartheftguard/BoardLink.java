@@ -36,6 +36,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -1022,6 +1023,197 @@ public final class BoardLink {
             boolean finalSuccess = success;
             if (callback != null) {
                 post(() -> callback.accept(finalSuccess));
+            }
+        });
+    }
+
+    /**
+     * Starts a VWTP 2.0 connection-setup sweep -- a different addressing
+     * scheme from startUdsAddrScan: candidates are single-byte logical
+     * module addresses (VCDS-style, e.g. 0x46=Central Convenience), and
+     * every request goes to CAN ID 0x200 with the response coming back on
+     * 0x200+addr. See JC-ESP32P4-M3's UDS_BODY_MODULE_RESEARCH.md
+     * 2026-09-16 update -- built after a full direct-CAN-ID sweep found
+     * only the Gateway reachable, suggesting body modules need this older,
+     * session-based routing instead. Fires and returns; poll
+     * {@link #fetchVwtpScanStatus} for progress.
+     */
+    /** {@code callback} gets (true, null) on success or (false, reason) on
+     * failure -- distinguishing "not connected to the board's Wi-Fi at all"
+     * from a board-side rejection (HTTP status + body) from a network-level
+     * exception (timeout, connection reset -- typically the board having
+     * just crashed/rebooted, e.g. from a brownout mid-scan), instead of
+     * collapsing all three into an undifferentiated false/failure. */
+    public void startVwtpScan(int addrStart, int addrEnd, int rxId, BiConsumer<Boolean, String> callback) {
+        Network network = boardNetwork;
+        if (network == null) {
+            String reason = "not connected to the board's Wi-Fi";
+            emitStatus("Connect to the board first", COLOR_ERROR);
+            if (callback != null) {
+                post(() -> callback.accept(false, reason));
+            }
+            return;
+        }
+        networkExecutor.execute(() -> {
+            boolean success = false;
+            String reason = null;
+            try {
+                byte[] body = String.format(Locale.US, "%X,%X,%X",
+                        addrStart, addrEnd, rxId).getBytes(StandardCharsets.UTF_8);
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/vwtp/scan"));
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setDoOutput(true);
+                connection.setUseCaches(false);
+                connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+                connection.setFixedLengthStreamingMode(body.length);
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    output.write(body);
+                }
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                emitLog("VWTP scan: HTTP " + code + " -> " + response);
+                success = code < 400;
+                if (!success) {
+                    reason = "board rejected the request (HTTP " + code + "): " + response;
+                }
+            } catch (Exception exception) {
+                reason = "network error -- " + exception.getMessage()
+                        + " (the board may have just reset)";
+                emitLog("VWTP scan request failed: " + exception.getMessage());
+            }
+            boolean finalSuccess = success;
+            String finalReason = reason;
+            if (callback != null) {
+                post(() -> callback.accept(finalSuccess, finalReason));
+            }
+        });
+    }
+
+    /** Current VWTP scan progress/results as raw JSON (state, current_addr,
+     * result_count, results[]) via the first callback argument, or null with
+     * a specific failure reason via the second -- see startVwtpScan's doc
+     * comment for why this isn't collapsed to a plain null. */
+    public void fetchVwtpScanStatus(BiConsumer<String, String> callback) {
+        if (callback == null) {
+            return;
+        }
+        Network network = boardNetwork;
+        if (network == null) {
+            callback.accept(null, "not connected to the board's Wi-Fi");
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/vwtp/scan"));
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                if (code < 400) {
+                    post(() -> callback.accept(response, null));
+                } else {
+                    post(() -> callback.accept(null, "board returned HTTP " + code + ": " + response));
+                }
+            } catch (Exception exception) {
+                post(() -> callback.accept(null, "network error -- " + exception.getMessage()
+                        + " (the board may have just reset)"));
+            }
+        });
+    }
+
+    /** Starts a deep scan -- combines the address-discovery sweep with an
+     * automatic identification-DID sweep against every address that
+     * responds, and (firmware-side) survives brownout resets by resuming
+     * on its own from NVS, so this is meant to be fired once and then left
+     * running unattended rather than needing to be re-triggered after every
+     * crash -- see JC-ESP32P4-M3's deep_scan_t doc comment. Same
+     * req_start,req_end,offset,extended body format as startUdsAddrScan. */
+    public void startDeepScan(int reqStart, int reqEnd, int offset, boolean extended, BiConsumer<Boolean, String> callback) {
+        Network network = boardNetwork;
+        if (network == null) {
+            String reason = "not connected to the board's Wi-Fi";
+            emitStatus("Connect to the board first", COLOR_ERROR);
+            if (callback != null) {
+                post(() -> callback.accept(false, reason));
+            }
+            return;
+        }
+        networkExecutor.execute(() -> {
+            boolean success = false;
+            String reason = null;
+            try {
+                byte[] body = String.format(Locale.US, "%X,%X,%X,%d",
+                        reqStart, reqEnd, offset, extended ? 1 : 0).getBytes(StandardCharsets.UTF_8);
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/deepscan"));
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setDoOutput(true);
+                connection.setUseCaches(false);
+                connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+                connection.setFixedLengthStreamingMode(body.length);
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    output.write(body);
+                }
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                emitLog("Deep scan: HTTP " + code + " -> " + response);
+                success = code < 400;
+                if (!success) {
+                    reason = "board rejected the request (HTTP " + code + "): " + response;
+                }
+            } catch (Exception exception) {
+                reason = "network error -- " + exception.getMessage()
+                        + " (the board may have just reset)";
+                emitLog("Deep scan request failed: " + exception.getMessage());
+            }
+            boolean finalSuccess = success;
+            String finalReason = reason;
+            if (callback != null) {
+                post(() -> callback.accept(finalSuccess, finalReason));
+            }
+        });
+    }
+
+    /** Current deep scan progress/results as raw JSON (state, current_req,
+     * hit_count, hits[] -- each hit has addr/session/did_results[]) via the
+     * first callback argument, or null with a specific failure reason via
+     * the second. A network error here is expected and routine while an
+     * unattended deep scan is running -- it likely just means the board
+     * brownout-reset and hasn't finished rejoining Wi-Fi yet, not that the
+     * scan failed (it resumes on its own once the board's back). */
+    public void fetchDeepScanStatus(BiConsumer<String, String> callback) {
+        if (callback == null) {
+            return;
+        }
+        Network network = boardNetwork;
+        if (network == null) {
+            callback.accept(null, "not connected to the board's Wi-Fi");
+            return;
+        }
+        networkExecutor.execute(() -> {
+            try {
+                HttpURLConnection connection = (HttpURLConnection) network.openConnection(new URL("http://" + AP_IP + "/api/deepscan"));
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(3000);
+                int code = connection.getResponseCode();
+                String response = readResponse(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+                connection.disconnect();
+                if (code < 400) {
+                    post(() -> callback.accept(response, null));
+                } else {
+                    post(() -> callback.accept(null, "board returned HTTP " + code + ": " + response));
+                }
+            } catch (Exception exception) {
+                post(() -> callback.accept(null, "network error -- " + exception.getMessage()
+                        + " (the board may have just reset -- it resumes automatically once back)"));
             }
         });
     }

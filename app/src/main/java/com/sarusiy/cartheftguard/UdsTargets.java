@@ -53,6 +53,17 @@ public final class UdsTargets {
     public static final int DEFAULT_DID_START = 0x0100;
     public static final int DEFAULT_DID_END = 0x0200;
 
+    /** ISO 14229-1 Annex F "identification" DID block (bootSoftwareId,
+     * vehicleManufacturerSparePartNumber, ECUSerialNumber, systemName,
+     * VIN, hardware/software numbers, etc.) -- standardized across
+     * manufacturers and meant specifically to answer "who are you", unlike
+     * DEFAULT_DID_START/END above which is just an arbitrary first guess.
+     * The right range to sweep first against any newly-discovered module
+     * whose identity is unknown (see the Deep Scan feature, which uses this
+     * range automatically for exactly that). */
+    public static final int IDENTIFICATION_DID_START = 0xF180;
+    public static final int IDENTIFICATION_DID_END = 0xF1A0;
+
     /** Worst case per DID: firmware's OBD_RESPONSE_TIMEOUT_MS (500) +
      * OBD_QUERY_INTERVAL_MS (200) if it times out rather than answering
      * quickly -- see main.c. Used to show a time estimate so a manually-
