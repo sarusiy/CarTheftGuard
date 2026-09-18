@@ -117,6 +117,13 @@ public final class BoardLink {
     private volatile Network boardNetwork;
     private ConnectivityManager.NetworkCallback networkCallback;
     private Runnable connectTimeoutRunnable;
+    /* Some boards (e.g. the ESP32-S3 revision) can't run BLE and their Wi-Fi
+     * AP's DHCP server reliably at the same time -- the join intermittently
+     * loses a radio-arbitration race and the phone never gets an IP, timing
+     * out with no onAvailable(). Retrying a few times papers over this
+     * without needing the board to give up BLE presence advertising. */
+    private static final int MAX_WIFI_JOIN_ATTEMPTS = 4;
+    private int wifiJoinAttempt;
     private final AtomicBoolean obdFetchInFlight = new AtomicBoolean(false);
     private final AtomicBoolean gpsFetchInFlight = new AtomicBoolean(false);
     private final AtomicBoolean dtcFetchInFlight = new AtomicBoolean(false);
@@ -135,6 +142,7 @@ public final class BoardLink {
             if (TARGET_NAME.equals(name) && !boardPresent) {
                 stopScan();
                 boardPresent = true;
+                wifiJoinAttempt = 0;
                 post(() -> {
                     for (Listener listener : listeners) {
                         listener.onBoardConnectionChanged(true);
@@ -475,6 +483,7 @@ public final class BoardLink {
             public void onAvailable(Network network) {
                 mainHandler.removeCallbacks(connectTimeoutRunnable);
                 boardNetwork = network;
+                wifiJoinAttempt = 0;
                 emitLog("Joined board Wi-Fi: " + AP_SSID);
                 post(() -> {
                     for (Listener listener : listeners) {
@@ -504,10 +513,18 @@ public final class BoardLink {
             if (networkCallback == callback && boardNetwork == null) {
                 connectivityManager.unregisterNetworkCallback(callback);
                 networkCallback = null;
-                emitStatus("Could not join board Wi-Fi", COLOR_ERROR);
+                wifiJoinAttempt++;
+                if (wifiJoinAttempt < MAX_WIFI_JOIN_ATTEMPTS) {
+                    emitStatus("Wi-Fi join attempt " + wifiJoinAttempt + " failed, retrying...", COLOR_PROGRESS);
+                    connectToBoardNetwork();
+                } else {
+                    emitStatus("Could not join board Wi-Fi", COLOR_ERROR);
+                }
             }
         };
-        emitStatus("Joining board Wi-Fi...", COLOR_PROGRESS);
+        emitStatus(wifiJoinAttempt > 0
+                ? "Joining board Wi-Fi (attempt " + (wifiJoinAttempt + 1) + "/" + MAX_WIFI_JOIN_ATTEMPTS + ")..."
+                : "Joining board Wi-Fi...", COLOR_PROGRESS);
         connectivityManager.requestNetwork(request, callback);
         mainHandler.postDelayed(connectTimeoutRunnable, 20000);
     }
@@ -1295,6 +1312,7 @@ public final class BoardLink {
     private void clearConnection(String status) {
         boardPresent = false;
         boardNetwork = null;
+        wifiJoinAttempt = 0;
         if (connectTimeoutRunnable != null) {
             mainHandler.removeCallbacks(connectTimeoutRunnable);
             connectTimeoutRunnable = null;
