@@ -545,8 +545,8 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
     }
 
     private void startDeepScan() {
-        int start = parseHexOrDefault(deepScanStartInput, 0x700);
-        int end = parseHexOrDefault(deepScanEndInput, 0x7FF);
+        int start = parseHexOrDefault(deepScanStartInput, 0x710);
+        int end = parseHexOrDefault(deepScanEndInput, 0x710);
         if (end < start) {
             deepScanStatusText.setText("Range end must be >= start.");
             return;
@@ -835,10 +835,10 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         LinearLayout deepScanRow = new LinearLayout(context);
         deepScanRow.setOrientation(LinearLayout.HORIZONTAL);
         deepScanStartInput = Views.input(context, "Start (hex)", android.text.InputType.TYPE_CLASS_TEXT);
-        deepScanStartInput.setText("700");
+        deepScanStartInput.setText("710");
         deepScanRow.addView(deepScanStartInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         deepScanEndInput = Views.input(context, "End (hex)", android.text.InputType.TYPE_CLASS_TEXT);
-        deepScanEndInput.setText("7FF");
+        deepScanEndInput.setText("710");
         LinearLayout.LayoutParams deepScanEndParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
         deepScanEndParams.leftMargin = Views.dp(context, 8);
         deepScanRow.addView(deepScanEndInput, deepScanEndParams);
@@ -1310,7 +1310,17 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         List<File> selected = new ArrayList<>();
         for (int index = 0; index < uploadCheckboxes.size(); index++) {
             if (uploadCheckboxes.get(index).isChecked()) {
-                selected.add(uploadCandidateFiles.get(index));
+                File csv = uploadCandidateFiles.get(index);
+                selected.add(csv);
+                /* Every recording since the candump-log export was added also has
+                 * a sibling .log (same base name) written by CanCaptureService for
+                 * SavvyCAN/offline analysis -- ride along on the same upload pass
+                 * instead of making the user pick it separately in the checkbox
+                 * list, which only shows one entry per recording. */
+                File candump = new File(csv.getParentFile(), stripExtension(csv.getName()) + ".log");
+                if (candump.exists()) {
+                    selected.add(candump);
+                }
             }
         }
         if (selected.isEmpty()) {
@@ -1320,12 +1330,17 @@ public final class RecordFragment extends Fragment implements BoardLink.Listener
         uploadNext(selected, 0, 0);
     }
 
+    private static String stripExtension(String fileName) {
+        int dot = fileName.lastIndexOf('.');
+        return dot > 0 ? fileName.substring(0, dot) : fileName;
+    }
+
     /** Uploads one file at a time (rather than in parallel) so the status
      * text can show clean progress and the relay isn't hit with a burst of
      * simultaneous requests. */
     private void uploadNext(List<File> files, int index, int succeeded) {
         if (index >= files.size()) {
-            uploadStatusText.setText("Uploaded " + succeeded + "/" + files.size() + " recording(s) to Drive.");
+            uploadStatusText.setText("Uploaded " + succeeded + "/" + files.size() + " file(s) to Drive.");
             return;
         }
         uploadStatusText.setText("Uploading " + (index + 1) + "/" + files.size() + ": " + files.get(index).getName());

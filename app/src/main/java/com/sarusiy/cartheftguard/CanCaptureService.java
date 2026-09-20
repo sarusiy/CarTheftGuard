@@ -126,6 +126,7 @@ public final class CanCaptureService extends Service {
 
     private void captureLoop(Network network, String boardIp, boolean passive, String label, String car) {
         Writer writer = null;
+        Writer candumpWriter = null;
         try {
             setCanMode(network, boardIp, passive);
             File baseDirectory = new File(getExternalFilesDir(null), "can-captures");
@@ -141,6 +142,15 @@ public final class CanCaptureService extends Service {
             filePath = file.getAbsolutePath();
             writer = new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8);
             writer.write("phone_time_ms,board_time_us,sequence,bus,can_id,extended,rtr,dlc,data_hex,gps_fix,gps_lat,gps_lon,gps_speed_kmh,gps_heading_deg,gps_satellites,can_mode\n");
+
+            /* Same frames, written a second time in candump/socketCAN log
+             * format ("(seconds.micros) can0 id#data") alongside the CSV --
+             * SavvyCAN and most other CAN reverse-engineering tools auto-
+             * detect this format with zero column-mapping, unlike our CSV.
+             * Board time (not phone time) so timestamps stay monotonic and
+             * gap-free even if the phone's HTTP polling stalls. */
+            File candumpFile = new File(directory, prefix + "-" + stamp + ".log");
+            candumpWriter = new OutputStreamWriter(new FileOutputStream(candumpFile), StandardCharsets.US_ASCII);
             /* Set once at the top of this method (setCanMode) and not changed
              * again anywhere in this recording's own loop, so it's valid for
              * every row -- stamped per-row (not just once in a file header)
@@ -173,12 +183,14 @@ public final class CanCaptureService extends Service {
                 for (int index = 0; index < frames.length(); index++) {
                     JSONObject frame = frames.getJSONObject(index);
                     long sequence = frame.getLong("seq");
+                    long timeUs = frame.getLong("time_us");
+                    String idHex = Long.toHexString(frame.getLong("id"));
                     GpsSnapshot gps = gpsSnapshot;
                     writer.write(System.currentTimeMillis() + ","
-                            + frame.getLong("time_us") + ","
+                            + timeUs + ","
                             + sequence + ","
                             + frame.optInt("bus", 0) + ",0x"
-                            + Long.toHexString(frame.getLong("id")).toUpperCase(Locale.US) + ","
+                            + idHex.toUpperCase(Locale.US) + ","
                             + frame.optBoolean("extended", false) + ","
                             + frame.optBoolean("rtr", false) + ","
                             + frame.getInt("dlc") + ","
@@ -190,6 +202,8 @@ public final class CanCaptureService extends Service {
                             + String.format(Locale.US, "%.1f", gps.headingDeg) + ","
                             + gps.satellites + ","
                             + canModeColumn + "\n");
+                    candumpWriter.write("(" + String.format(Locale.US, "%d.%06d", timeUs / 1_000_000, timeUs % 1_000_000) + ") can0 "
+                            + idHex.toLowerCase(Locale.US) + "#" + frame.getString("data").toLowerCase(Locale.US) + "\n");
                     after = sequence;
                     frameCount++;
                 }
@@ -200,6 +214,7 @@ public final class CanCaptureService extends Service {
 
                 if (now - lastStatusMs >= 1000) {
                     writer.flush();
+                    candumpWriter.flush();
                     lastStatusMs = now;
                     publishStatus(null);
                     getSystemService(NotificationManager.class).notify(
@@ -214,6 +229,12 @@ public final class CanCaptureService extends Service {
             if (writer != null) {
                 try {
                     writer.close();
+                } catch (Exception ignored) {
+                }
+            }
+            if (candumpWriter != null) {
+                try {
+                    candumpWriter.close();
                 } catch (Exception ignored) {
                 }
             }
