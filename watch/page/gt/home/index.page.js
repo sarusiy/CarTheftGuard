@@ -2,6 +2,14 @@ import * as hmUI from "@zos/ui";
 import { px } from "@zos/utils";
 import { getDeviceInfo } from "@zos/device";
 import { setPageBrightTime, pauseDropWristScreenOff } from "@zos/display";
+import {
+  Vibrator,
+  VIBRATOR_SCENE_NOTIFICATION,
+  VIBRATOR_SCENE_DURATION,
+  VIBRATOR_SCENE_SHORT_STRONG,
+} from "@zos/sensor";
+import { create, id } from "@zos/media";
+import { LocalStorage } from "@zos/storage";
 import BLEMaster, { ab2str } from "../../../lib/ble-master";
 
 const { width: W, height: H } = getDeviceInfo();
@@ -29,12 +37,100 @@ const COLOR_BTN = 0x1a73e8;
 const COLOR_BTN_PRESS = 0x174ea6;
 
 const ble = new BLEMaster();
+const vibrator = new Vibrator();
+const storage = new LocalStorage();
+const ALERT_MODE_KEY = "alert_mode";
+const ALERT_MODES = ["OFF", "VIB", "VIB+SND"];
+const DISCONNECT_VIBRATION_MS = 5000;
 
 let stepIndex = 4;
 let ready = false;
 let busy = false;
+let alertMode = Number(storage.getItem(ALERT_MODE_KEY, 2));
+if (!(alertMode >= 0 && alertMode < ALERT_MODES.length)) alertMode = 2;
+let stopVibrationTimer = null;
+let pulseTimer = null;
+let player = null;
 let statusText = null;
 let valueText = null;
+let alertButton = null;
+let leaving = false;
+
+function stopVibration() {
+  clearInterval(pulseTimer);
+  clearTimeout(stopVibrationTimer);
+  vibrator.stop();
+}
+
+function vibrate(scene) {
+  stopVibration();
+  vibrator.setMode(scene);
+  vibrator.start();
+}
+
+// Repeated plain pulses for exactly durationMs. The "call" vibration scene
+// appeared to silence audio played at the same time.
+function vibratePulses(durationMs) {
+  stopVibration();
+  const pulse = () => {
+    vibrator.stop();
+    vibrator.setMode(VIBRATOR_SCENE_DURATION);
+    vibrator.start();
+  };
+  pulse();
+  pulseTimer = setInterval(pulse, 700);
+  stopVibrationTimer = setTimeout(stopVibration, durationMs);
+}
+
+// The watch only gives out one media player at a time (a second create() returns
+// undefined), so a single instance is created once and reused for every sound.
+function getPlayer() {
+  if (player) return player;
+  player = create(id.PLAYER);
+  if (!player) return null;
+  player.addEventListener(player.event.PREPARE, (result) => {
+    if (result) player.start();
+  });
+  return player;
+}
+
+function playSound(file) {
+  try {
+    const p = getPlayer();
+    if (!p) return;
+    try {
+      p.stop();
+    } catch (e) {
+      // nothing was playing
+    }
+    p.setSource(p.source.FILE, { file });
+    p.prepare();
+  } catch (e) {
+    // no media support: the vibration alert still works
+  }
+}
+
+function alertLinkUp() {
+  if (alertMode >= 1) vibrate(VIBRATOR_SCENE_NOTIFICATION);
+  if (alertMode === 2) playSound("link_up.mp3");
+}
+
+function alertLinkDown() {
+  if (alertMode >= 1) vibratePulses(DISCONNECT_VIBRATION_MS);
+  if (alertMode === 2) playSound("link_down.mp3");
+}
+
+function alertLabel() {
+  return "Alert: " + ALERT_MODES[alertMode];
+}
+
+function cycleAlertMode() {
+  alertMode = (alertMode + 1) % ALERT_MODES.length;
+  storage.setItem(ALERT_MODE_KEY, alertMode);
+  alertButton.setProperty(hmUI.prop.TEXT, alertLabel());
+  if (alertMode === 1) vibrate(VIBRATOR_SCENE_SHORT_STRONG);
+  if (alertMode === 2) playSound("link_up.mp3");
+}
 
 function setStatus(text, color) {
   statusText.setProperty(hmUI.prop.MORE, { text, color });
@@ -97,7 +193,10 @@ function connect(mac) {
       buildProfile();
       return;
     }
+    if (leaving) return;
+    const wasConnected = ready;
     fail("Link lost [" + result.status + "]");
+    if (wasConnected) alertLinkDown();
   });
 }
 
@@ -122,6 +221,7 @@ function buildProfile() {
     ready = true;
     busy = false;
     setStatus("Connected", COLOR_OK);
+    alertLinkUp();
   });
 }
 
@@ -211,9 +311,30 @@ Page({
     createButton(60, "SLOWER", () => changeStep(1));
     createButton(250, "FASTER", () => changeStep(-1));
 
+    alertButton = hmUI.createWidget(hmUI.widget.BUTTON, {
+      x: px(140),
+      y: px(395),
+      w: px(200),
+      h: px(50),
+      radius: px(16),
+      text: alertLabel(),
+      text_size: px(22),
+      color: COLOR_TEXT,
+      normal_color: COLOR_BTN,
+      press_color: COLOR_BTN_PRESS,
+      click_func: cycleAlertMode,
+    });
+
     scanAndConnect();
   },
   onDestroy() {
+    leaving = true;
+    stopVibration();
+    try {
+      if (player) player.stop();
+    } catch (e) {
+      // nothing was playing
+    }
     ble.quit();
   },
 });

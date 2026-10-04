@@ -15,6 +15,24 @@ The watch connects only with full 128-bit UUIDs (`0000fff0-0000-1000-8000-00805f
 form) and `pair: false`; short UUIDs and the library's default pairing both failed.
 The BLE helper is a vendored copy of Zepp's MIT-licensed easy-ble (`lib/ble-master.js`).
 
+## Link alerts
+
+While the watch app is open it alerts on the board link:
+
+- connected: two short pulses and a short chirp
+- link lost: 5 seconds of vibration pulses and a 5-second alarm
+
+The **Alert** button at the bottom cycles OFF, VIB and VIB+SND and is saved on the
+watch. The sounds are `assets/*/link_up.mp3` and `link_down.mp3` (44.1 kHz mono).
+
+Zepp OS does not allow the BLE client calls in background services, so the watch app
+cannot keep its link alive after you leave it. For alerts with the watch app closed,
+the Android app posts "Board connected / disconnected" notifications that the Zepp app
+mirrors to the watch.
+
+Zepp OS gives out only one media player at a time, so the app creates one and reuses
+it for all sounds.
+
 ## Install on the watch
 
 The QR-scan install did not work on our watch; Bridge install does.
