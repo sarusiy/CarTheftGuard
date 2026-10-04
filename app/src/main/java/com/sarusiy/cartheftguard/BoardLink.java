@@ -491,6 +491,7 @@ public final class BoardLink {
                     }
                 });
                 emitStatus("Wi-Fi ready: " + AP_IP, COLOR_SUCCESS);
+                LinkNotifier.boardConnected(appContext);
             }
 
             @Override
@@ -498,6 +499,7 @@ public final class BoardLink {
                 if (network.equals(boardNetwork)) {
                     boardNetwork = null;
                     emitStatus("Board Wi-Fi lost", COLOR_ERROR);
+                    LinkNotifier.boardDisconnected(appContext);
                 }
             }
         };
